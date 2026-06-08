@@ -227,6 +227,20 @@ def detect_and_set_bookmarks(path: str) -> dict:
         doc.close()
         return {"bookmarks_added": 0, "reason": "no headings matched"}
 
+    # Normalize: first entry must be level 1, no entry may jump more than +1 deeper
+    normalized = []
+    prev_level = 0
+    for row in toc:
+        lvl = row[0]
+        if not normalized:
+            lvl = 1
+        else:
+            lvl = min(lvl, prev_level + 1)
+            lvl = max(1, lvl)
+        normalized.append([lvl, row[1], row[2]])
+        prev_level = lvl
+    toc = normalized
+
     # Limit to 100 bookmarks
     toc = toc[:100]
     doc.set_toc(toc)

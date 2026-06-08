@@ -1,16 +1,9 @@
 <?php
 /**
- * Plugin Name: Accessibility for PDFs
- * Plugin URI:  https://github.com/andrejsrna/accessibility-for-pdfs-wp
- * Description: Automatically makes PDF files accessible: OCR for scanned documents, bookmarks, metadata (title, author, language), font embedding. Processes new uploads automatically in the background.
- * Version:     1.0.0
- * Author:      Andrej Srna
- * Author URI:  https://github.com/andrejsrna
- * License:     GPL-2.0-or-later
- * License URI: https://www.gnu.org/licenses/gpl-2.0.html
- * Text Domain: accessibility-for-pdfs
- * Requires at least: 6.0
- * Requires PHP: 8.0
+ * Plugin Name: SBA PDF Accessibility
+ * Description: Kontrola a oprava prístupnosti PDF súborov (OCR, záložky, metadata, fonty, jazyk, alt texty).
+ * Version: 1.0.0
+ * Author: SBA Agency
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -267,15 +260,26 @@ function sba_pdf_ajax_save_alts(): void {
 
 // --- Helpers --------------------------------------------------------------
 
-function sba_pdf_get_all(): array {
+function sba_pdf_get_all( int $paged = 1, int $per_page = 100 ): array {
 	return get_posts( [
 		'post_type'      => 'attachment',
 		'post_mime_type' => 'application/pdf',
 		'post_status'    => 'inherit',
-		'posts_per_page' => -1,
+		'posts_per_page' => $per_page,
+		'paged'          => $paged,
 		'orderby'        => 'date',
 		'order'          => 'DESC',
 	] );
+}
+
+function sba_pdf_count_all(): int {
+	global $wpdb;
+	return (int) $wpdb->get_var(
+		"SELECT COUNT(*) FROM {$wpdb->posts}
+		 WHERE post_type = 'attachment'
+		   AND post_mime_type = 'application/pdf'
+		   AND post_status = 'inherit'"
+	);
 }
 
 function sba_pdf_run( string $action, string $path, array $opts = [] ): ?array {
@@ -360,9 +364,14 @@ function sba_pdf_badge( array $status, string $key ): string {
 // --- Admin page -----------------------------------------------------------
 
 function sba_pdf_render_page(): void {
-	$attachments = sba_pdf_get_all();
+	$per_page    = 100;
+	$paged       = max( 1, (int) ( $_GET['paged'] ?? 1 ) );
+	$total       = sba_pdf_count_all();
+	$total_pages = (int) ceil( $total / $per_page );
+	$attachments = sba_pdf_get_all( $paged, $per_page );
 	$nonce       = wp_create_nonce( 'sba_pdf_a11y' );
 	$ajax_url    = admin_url( 'admin-ajax.php' );
+	$base_url    = admin_url( 'upload.php?page=sba-pdf-accessibility' );
 	?>
 	<div class="wrap">
 		<h1>PDF Prístupnosť</h1>
@@ -388,11 +397,22 @@ function sba_pdf_render_page(): void {
 						</select>
 					</label>
 				</div>
-				<div class="alignright tablenav-pages" style="line-height:36px;">
+				<div class="alignright tablenav-pages" style="line-height:36px; display:flex; align-items:center; gap:12px;">
 					<span id="sba-progress" style="display:none;">
 						Spracováva sa <strong id="sba-prog-cur">0</strong> / <strong id="sba-prog-tot">0</strong>&hellip;
 					</span>
-					<span style="margin-left:12px; color:#555;"><?= count( $attachments ) ?> PDF súborov</span>
+					<span style="color:#555;"><?= $total ?> PDF súborov</span>
+					<?php if ( $total_pages > 1 ) : ?>
+					<span class="displaying-num">
+						<?php if ( $paged > 1 ) : ?>
+							<a href="<?= esc_url( add_query_arg( 'paged', $paged - 1, $base_url ) ) ?>" class="button button-small">‹ Predch.</a>
+						<?php endif; ?>
+						Strana <?= $paged ?> / <?= $total_pages ?>
+						<?php if ( $paged < $total_pages ) : ?>
+							<a href="<?= esc_url( add_query_arg( 'paged', $paged + 1, $base_url ) ) ?>" class="button button-small">Nasl. ›</a>
+						<?php endif; ?>
+					</span>
+					<?php endif; ?>
 				</div>
 				<br class="clear">
 			</div>
@@ -466,6 +486,22 @@ function sba_pdf_render_page(): void {
 				<?php endforeach; ?>
 				</tbody>
 			</table>
+
+			<?php if ( $total_pages > 1 ) : ?>
+			<div class="tablenav bottom">
+				<div class="tablenav-pages" style="display:flex; justify-content:flex-end; align-items:center; gap:8px; padding:8px 0;">
+					<?php if ( $paged > 1 ) : ?>
+						<a href="<?= esc_url( add_query_arg( 'paged', 1, $base_url ) ) ?>" class="button button-small">« Prvá</a>
+						<a href="<?= esc_url( add_query_arg( 'paged', $paged - 1, $base_url ) ) ?>" class="button button-small">‹ Predch.</a>
+					<?php endif; ?>
+					<span style="font-size:13px; color:#555;">Strana <?= $paged ?> / <?= $total_pages ?></span>
+					<?php if ( $paged < $total_pages ) : ?>
+						<a href="<?= esc_url( add_query_arg( 'paged', $paged + 1, $base_url ) ) ?>" class="button button-small">Nasl. ›</a>
+						<a href="<?= esc_url( add_query_arg( 'paged', $total_pages, $base_url ) ) ?>" class="button button-small">Posl. »</a>
+					<?php endif; ?>
+				</div>
+			</div>
+			<?php endif; ?>
 		</form>
 
 		<!-- Alt text modal -->
