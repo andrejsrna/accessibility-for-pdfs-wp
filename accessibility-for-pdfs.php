@@ -497,13 +497,14 @@ function sba_pdf_render_page(): void {
 						<td id="sba-col-bm-<?= $att->ID ?>">
 							<?= sba_pdf_badge( $meta, 'bookmarks_count' ) ?>
 						</td>
-						<td id="sba-col-mtitle-<?= $att->ID ?>" style="white-space:nowrap;">
-							<?= sba_pdf_badge( $meta, 'meta_title' ) ?>
-							<button type="button" class="sba-mtitle-btn button button-small"
-								data-id="<?= $att->ID ?>"
-								data-title="<?= esc_attr( $meta['meta_title'] ?? '' ) ?>"
-								style="margin-top:2px; font-size:10px; padding:0 4px;"
-								title="Upraviť meta titul">✎</button>
+						<td id="sba-col-mtitle-<?= $att->ID ?>">
+							<div class="sba-mtitle-cell">
+								<?= sba_pdf_badge( $meta, 'meta_title' ) ?>
+								<button type="button" class="sba-mtitle-btn button button-small"
+									data-id="<?= $att->ID ?>"
+									data-title="<?= esc_attr( $meta['meta_title'] ?? '' ) ?>"
+									title="Upraviť meta titul">✎</button>
+							</div>
 						</td>
 						<td id="sba-col-lang-<?= $att->ID ?>">
 							<?= sba_pdf_badge( $meta, 'meta_lang' ) ?>
@@ -591,7 +592,7 @@ function sba_pdf_render_page(): void {
 	</div>
 
 	<style>
-		.sba-badge         { display:inline-block; padding:2px 6px; border-radius:3px; font-size:11px; font-weight:600; white-space:nowrap; max-width:160px; overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
+		.sba-badge         { display:inline-block; padding:2px 6px; border-radius:3px; font-size:11px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
 		.sba-badge-ok      { background:#d1e7dd; color:#0a3622; }
 		.sba-badge-err     { background:#f8d7da; color:#58151c; }
 		.sba-badge-warn    { background:#fff3cd; color:#664d03; }
@@ -600,7 +601,9 @@ function sba_pdf_render_page(): void {
 		.sba-spin          { display:inline-block; width:14px; height:14px; border:2px solid #ccc; border-top-color:#2271b1; border-radius:50%; animation:sba-rotate .7s linear infinite; vertical-align:middle; }
 		@keyframes sba-rotate { to { transform:rotate(360deg); } }
 		#sba-alt-modal.open, #sba-mtitle-modal.open { display:flex !important; }
-		.sba-mtitle-btn { vertical-align:middle; margin-left:2px !important; }
+		.sba-mtitle-cell   { display:flex; align-items:center; gap:4px; max-width:210px; min-width:0; }
+		.sba-mtitle-cell .sba-badge { flex:1; min-width:0; max-width:none; }
+		.sba-mtitle-btn    { flex-shrink:0; font-size:10px !important; padding:0 4px !important; line-height:20px !important; height:20px !important; }
 	</style>
 
 	<script>
@@ -627,7 +630,12 @@ function sba_pdf_render_page(): void {
 			if (val === undefined || val === null || val === '') {
 				return '<span class="sba-badge sba-badge-na">—</span>';
 			}
-			if (key === 'meta_title' || key === 'meta_lang') {
+			if (key === 'meta_title') {
+				if (!val) return '<span class="sba-badge sba-badge-err">✗</span>';
+				var short = val.length > 28 ? val.substring(0, 26) + '…' : val;
+				return '<span class="sba-badge sba-badge-ok" title="' + $('<div>').text(val).html() + '">✓ ' + $('<div>').text(short).html() + '</span>';
+			}
+			if (key === 'meta_lang') {
 				return val
 					? '<span class="sba-badge sba-badge-ok" title="' + $('<div>').text(val).html() + '">✓ ' + $('<div>').text(val).html() + '</span>'
 					: '<span class="sba-badge sba-badge-err">✗</span>';
@@ -653,8 +661,8 @@ function sba_pdf_render_page(): void {
 			(function () {
 				var cell = $('#sba-col-mtitle-' + id);
 				var btn  = cell.find('.sba-mtitle-btn').detach();
-				cell.html(badge(data.meta_title, 'meta_title'));
-				if (btn.length) { btn.attr('data-title', data.meta_title || ''); cell.append(btn); }
+				cell.html('<div class="sba-mtitle-cell">' + badge(data.meta_title, 'meta_title') + '</div>');
+				if (btn.length) { btn.attr('data-title', data.meta_title || ''); cell.find('.sba-mtitle-cell').append(btn); }
 			})();
 			$('#sba-col-lang-'    + id).html(badge(data.meta_lang,          'meta_lang'));
 			$('#sba-col-fonts-'   + id).html(badge(data.fonts_embedded,     'fonts_embedded'));
@@ -821,8 +829,8 @@ function sba_pdf_render_page(): void {
 						$('#sba-mtitle-modal').removeClass('open');
 						var cell   = $('#sba-col-mtitle-' + mtitleCurrentId);
 						var editBtn = cell.find('.sba-mtitle-btn').detach().attr('data-title', title);
-						cell.html(badge(title, 'meta_title'));
-						cell.append(editBtn);
+						cell.html('<div class="sba-mtitle-cell">' + badge(title, 'meta_title') + '</div>');
+						cell.find('.sba-mtitle-cell').append(editBtn);
 						showNotice('Meta titul uložený.', 'success');
 					} else {
 						$('#sba-mtitle-status').css('color', '#d63638').text(r.data || 'Chyba pri ukladaní.');
