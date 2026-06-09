@@ -177,9 +177,10 @@ JS;
 
 // --- AJAX handlers --------------------------------------------------------
 
-add_action( 'wp_ajax_sba_pdf_check',        'sba_pdf_ajax_check' );
-add_action( 'wp_ajax_sba_pdf_process',      'sba_pdf_ajax_process' );
-add_action( 'wp_ajax_sba_pdf_save_alts',    'sba_pdf_ajax_save_alts' );
+add_action( 'wp_ajax_sba_pdf_check',            'sba_pdf_ajax_check' );
+add_action( 'wp_ajax_sba_pdf_process',          'sba_pdf_ajax_process' );
+add_action( 'wp_ajax_sba_pdf_save_alts',        'sba_pdf_ajax_save_alts' );
+add_action( 'wp_ajax_sba_pdf_save_meta_title',  'sba_pdf_ajax_save_meta_title' );
 
 function sba_pdf_ajax_check(): void {
 	check_ajax_referer( 'sba_pdf_a11y', 'nonce' );
@@ -238,6 +239,40 @@ function sba_pdf_ajax_process(): void {
 
 	$result['status'] = $status;
 	wp_send_json_success( $result );
+}
+
+function sba_pdf_ajax_save_meta_title(): void {
+	check_ajax_referer( 'sba_pdf_a11y', 'nonce' );
+	if ( ! current_user_can( 'upload_files' ) ) {
+		wp_die( '', 403 );
+	}
+
+	$id    = intval( $_POST['id'] ?? 0 );
+	$title = sanitize_text_field( $_POST['title'] ?? '' );
+
+	if ( ! $id ) {
+		wp_send_json_error( 'Neplatné ID.' );
+	}
+
+	$path = get_attached_file( $id );
+	if ( ! $path || ! file_exists( $path ) ) {
+		wp_send_json_error( 'Súbor nenájdený.' );
+	}
+
+	// Zapis nový titul do PDF metadát cez Python skript
+	$result = sba_pdf_run( 'process', $path, [
+		'title'  => $title,
+		'author' => get_bloginfo( 'name' ),
+		'lang'   => 'slk+eng',
+	] );
+
+	// Aktualizuj uložený meta stav
+	$meta = sba_pdf_get_meta( $id );
+	$meta['meta_title']   = $title;
+	$meta['processed_at'] = current_time( 'mysql' );
+	sba_pdf_save_meta( $id, $meta );
+
+	wp_send_json_success( [ 'title' => $title ] );
 }
 
 function sba_pdf_ajax_save_alts(): void {
@@ -333,10 +368,18 @@ function sba_pdf_badge( array $status, string $key ): string {
 	}
 	$val = $status[ $key ] ?? null;
 
-	if ( $key === 'meta_title' || $key === 'meta_lang' ) {
+	if ( $key === 'meta_lang' ) {
 		return $val
 			? '<span class="sba-badge sba-badge-ok" title="' . esc_attr( $val ) . '">✓ ' . esc_html( $val ) . '</span>'
 			: '<span class="sba-badge sba-badge-err">✗</span>';
+	}
+
+	if ( $key === 'meta_title' ) {
+		if ( ! $val ) {
+			return '<span class="sba-badge sba-badge-err">✗</span>';
+		}
+		$short = mb_strlen( $val ) > 28 ? mb_substr( $val, 0, 26 ) . '…' : $val;
+		return '<span class="sba-badge sba-badge-ok sba-meta-title-badge" title="' . esc_attr( $val ) . '">✓ ' . esc_html( $short ) . '</span>';
 	}
 
 	if ( $key === 'images_without_alt' ) {
@@ -454,8 +497,13 @@ function sba_pdf_render_page(): void {
 						<td id="sba-col-bm-<?= $att->ID ?>">
 							<?= sba_pdf_badge( $meta, 'bookmarks_count' ) ?>
 						</td>
-						<td id="sba-col-mtitle-<?= $att->ID ?>">
+						<td id="sba-col-mtitle-<?= $att->ID ?>" style="white-space:nowrap;">
 							<?= sba_pdf_badge( $meta, 'meta_title' ) ?>
+							<button type="button" class="sba-mtitle-btn button button-small"
+								data-id="<?= $att->ID ?>"
+								data-title="<?= esc_attr( $meta['meta_title'] ?? '' ) ?>"
+								style="margin-top:2px; font-size:10px; padding:0 4px;"
+								title="Upraviť meta titul">✎</button>
 						</td>
 						<td id="sba-col-lang-<?= $att->ID ?>">
 							<?= sba_pdf_badge( $meta, 'meta_lang' ) ?>
@@ -518,10 +566,32 @@ function sba_pdf_render_page(): void {
 				</div>
 			</div>
 		</div>
+
+		<!-- Meta titul modal -->
+		<div id="sba-mtitle-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,.5); z-index:9999; align-items:center; justify-content:center;">
+			<div style="background:#fff; border-radius:4px; padding:24px; max-width:480px; width:90%;">
+				<h2 style="margin-top:0; font-size:16px;">Upraviť meta titul PDF</h2>
+				<p style="color:#555; font-size:13px; margin-top:0;">
+					Titul sa zapíše priamo do metadát PDF súboru a zobrazuje sa v čítačkách a PDF prehliadačoch.
+				</p>
+				<input type="text" id="sba-mtitle-input"
+					style="width:100%; padding:8px 10px; font-size:14px; border:1px solid #8c8f94; border-radius:3px; box-sizing:border-box;"
+					placeholder="Zadajte meta titul…">
+				<p id="sba-mtitle-hint" style="font-size:11px; color:#888; margin:6px 0 0;">
+					Odporúčaná dĺžka: do 70 znakov.
+					<span id="sba-mtitle-count" style="font-weight:600;"></span>
+				</p>
+				<div style="margin-top:16px; display:flex; gap:8px; align-items:center;">
+					<button type="button" id="sba-mtitle-save" class="button button-primary">Uložiť a zapísať do PDF</button>
+					<button type="button" id="sba-mtitle-cancel" class="button">Zrušiť</button>
+					<span id="sba-mtitle-status" style="font-size:12px; margin-left:4px;"></span>
+				</div>
+			</div>
+		</div>
 	</div>
 
 	<style>
-		.sba-badge         { display:inline-block; padding:2px 6px; border-radius:3px; font-size:11px; font-weight:600; white-space:nowrap; }
+		.sba-badge         { display:inline-block; padding:2px 6px; border-radius:3px; font-size:11px; font-weight:600; white-space:nowrap; max-width:160px; overflow:hidden; text-overflow:ellipsis; vertical-align:middle; }
 		.sba-badge-ok      { background:#d1e7dd; color:#0a3622; }
 		.sba-badge-err     { background:#f8d7da; color:#58151c; }
 		.sba-badge-warn    { background:#fff3cd; color:#664d03; }
@@ -529,7 +599,8 @@ function sba_pdf_render_page(): void {
 		.sba-badge-pending { background:#cff4fc; color:#055160; }
 		.sba-spin          { display:inline-block; width:14px; height:14px; border:2px solid #ccc; border-top-color:#2271b1; border-radius:50%; animation:sba-rotate .7s linear infinite; vertical-align:middle; }
 		@keyframes sba-rotate { to { transform:rotate(360deg); } }
-		#sba-alt-modal.open { display:flex !important; }
+		#sba-alt-modal.open, #sba-mtitle-modal.open { display:flex !important; }
+		.sba-mtitle-btn { vertical-align:middle; margin-left:2px !important; }
 	</style>
 
 	<script>
@@ -579,7 +650,12 @@ function sba_pdf_render_page(): void {
 		function updateRow(id, data) {
 			$('#sba-col-text-'    + id).html(badge(data.has_text,           'has_text'));
 			$('#sba-col-bm-'      + id).html(badge(data.bookmarks_count,    'bookmarks_count'));
-			$('#sba-col-mtitle-'  + id).html(badge(data.meta_title,         'meta_title'));
+			(function () {
+				var cell = $('#sba-col-mtitle-' + id);
+				var btn  = cell.find('.sba-mtitle-btn').detach();
+				cell.html(badge(data.meta_title, 'meta_title'));
+				if (btn.length) { btn.attr('data-title', data.meta_title || ''); cell.append(btn); }
+			})();
 			$('#sba-col-lang-'    + id).html(badge(data.meta_lang,          'meta_lang'));
 			$('#sba-col-fonts-'   + id).html(badge(data.fonts_embedded,     'fonts_embedded'));
 			$('#sba-col-alts-'    + id).html(badge(data.images_without_alt, 'images_without_alt'));
@@ -706,6 +782,56 @@ function sba_pdf_render_page(): void {
 							.attr('class', 'sba-badge sba-badge-ok').text('✓');
 					}
 				});
+		});
+
+		// Meta titul modal
+		var mtitleCurrentId = null;
+
+		$(document).on('click', '.sba-mtitle-btn', function () {
+			mtitleCurrentId = $(this).data('id');
+			var cur = $(this).data('title') || '';
+			$('#sba-mtitle-input').val(cur);
+			updateMtitleCount(cur.length);
+			$('#sba-mtitle-status').text('');
+			$('#sba-mtitle-modal').addClass('open');
+			setTimeout(function () { $('#sba-mtitle-input').focus().select(); }, 50);
+		});
+
+		function updateMtitleCount(len) {
+			$('#sba-mtitle-count').text(len + ' znakov').css('color', len > 70 ? '#d63638' : '#888');
+		}
+
+		$('#sba-mtitle-input').on('input', function () {
+			updateMtitleCount(this.value.length);
+		});
+
+		$('#sba-mtitle-cancel').on('click', function () {
+			$('#sba-mtitle-modal').removeClass('open');
+		});
+
+		$('#sba-mtitle-save').on('click', function () {
+			var title = $('#sba-mtitle-input').val().trim();
+			if (!title) { $('#sba-mtitle-status').css('color', '#d63638').text('Zadajte titul.'); return; }
+			var saveBtn = $(this).prop('disabled', true).text('Ukladám…');
+			$('#sba-mtitle-status').text('');
+
+			$.post(ajaxUrl, { action: 'sba_pdf_save_meta_title', nonce: nonce, id: mtitleCurrentId, title: title })
+				.done(function (r) {
+					if (r.success) {
+						$('#sba-mtitle-modal').removeClass('open');
+						var cell   = $('#sba-col-mtitle-' + mtitleCurrentId);
+						var editBtn = cell.find('.sba-mtitle-btn').detach().attr('data-title', title);
+						cell.html(badge(title, 'meta_title'));
+						cell.append(editBtn);
+						showNotice('Meta titul uložený.', 'success');
+					} else {
+						$('#sba-mtitle-status').css('color', '#d63638').text(r.data || 'Chyba pri ukladaní.');
+					}
+				})
+				.fail(function () {
+					$('#sba-mtitle-status').css('color', '#d63638').text('Požiadavka zlyhala.');
+				})
+				.always(function () { saveBtn.prop('disabled', false).text('Uložiť a zapísať do PDF'); });
 		});
 	});
 	</script>
