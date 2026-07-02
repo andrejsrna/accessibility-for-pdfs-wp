@@ -1,0 +1,4 @@
+pymupdf
+pdfservices-sdk==4.2.0
+opendataloader-pdf==2.4.7
+pikepdf
