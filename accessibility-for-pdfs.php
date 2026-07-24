@@ -21,25 +21,22 @@ require_once SBA_PDF_A11Y_DIR . 'includes/class-ajax.php';
 require_once SBA_PDF_A11Y_DIR . 'includes/media-modal.php';
 require_once SBA_PDF_A11Y_DIR . 'includes/admin-page.php';
 
-// ─── Auto-processing on upload (WP-Cron) ──────────────────────────────────
+// ─── Automatic upload pipeline (WP-Cron) ─────────────────────────────────
 
 add_action( 'add_attachment', function ( int $attachment_id ) {
 	if ( get_post_mime_type( $attachment_id ) !== 'application/pdf' ) {
 		return;
 	}
 
-	// Mark as pending and process asynchronously so the upload itself remains fast.
 	sba_pdf_save_meta( $attachment_id, [ 'status' => 'pending', 'queued_at' => current_time( 'mysql' ) ] );
-	wp_schedule_single_event( time() + 5, 'sba_pdf_process_async', [ $attachment_id ] );
+	if ( ! wp_next_scheduled( 'sba_pdf_auto_process_async', [ $attachment_id ] ) ) {
+		wp_schedule_single_event( time() + 5, 'sba_pdf_auto_process_async', [ $attachment_id ] );
+	}
 } );
 
-add_action( 'sba_pdf_process_async', function ( int $attachment_id ) {
+add_action( 'sba_pdf_auto_process_async', function ( int $attachment_id ) {
 	$attachment = get_post( $attachment_id );
-	if ( ! $attachment ) {
-		return;
-	}
-
-	$path = get_attached_file( $attachment_id );
+	$path       = $attachment ? get_attached_file( $attachment_id ) : '';
 	if ( ! $path || ! file_exists( $path ) ) {
 		return;
 	}
@@ -51,11 +48,29 @@ add_action( 'sba_pdf_process_async', function ( int $attachment_id ) {
 		'lang'    => 'slk+eng',
 	] );
 
-	$status = ( $result && isset( $result['final'] ) ) ? $result['final'] : [];
+	if ( ! is_array( $result ) || ! empty( $result['busy'] ) ) {
+		return;
+	}
+
+	$status = $result['final'] ?? [];
+	if ( empty( $status['tagged_pdf'] ) ) {
+		$localtag = sba_pdf_run( 'localtag', $path, [ 'title' => $attachment->post_title, 'lang' => 'slk+eng' ] );
+		if ( is_array( $localtag ) && ! empty( $localtag['localtagged'] ) ) {
+			$status = $localtag;
+		}
+	}
 	$status['processed_at'] = current_time( 'mysql' );
 	$status['checked_at']   = current_time( 'mysql' );
 	$status['auto']         = true;
 	sba_pdf_save_status_meta( $attachment_id, $status );
+
+	// AI suggestions are generated in bounded batches; upload remains fast.
+	sba_pdf_auto_suggest_alts( $attachment_id );
+} );
+
+// Compatibility with jobs queued by older plugin versions.
+add_action( 'sba_pdf_process_async', function ( int $attachment_id ) {
+	wp_schedule_single_event( time(), 'sba_pdf_auto_process_async', [ $attachment_id ] );
 } );
 
 // ─── Admin menu + assets ──────────────────────────────────────────────────

@@ -87,7 +87,7 @@ function sba_pdf_render_page(): void {
 						<button type="button" class="button button-primary sba-action-btn sba-process-btn" data-id="<?= $att->ID ?>">Spracovať</button>
 					<?php elseif ( $status['level'] === 'yellow' ) : ?>
 						<button type="button" class="button button-primary sba-action-btn sba-alts-btn"
-							data-id="<?= $att->ID ?>" data-images="<?= $img_total ?>">Dopísať alt texty</button>
+							data-id="<?= $att->ID ?>" data-images="<?= $img_total ?>">Skontrolovať obrázky</button>
 					<?php else : ?>
 						<?php if ( $has_images ) : ?>
 							<button type="button" class="button button-small sba-action-btn sba-alts-btn"
@@ -121,16 +121,16 @@ function sba_pdf_render_alt_modal(): void {
 	?>
 	<div id="sba-alt-modal" class="sba-modal">
 		<div class="sba-modal-box sba-modal-box-scroll">
-			<h2>Alt texty pre obrázky</h2>
-			<p>Popíšte obsah každého obrázka pre používateľov čítačiek obrazovky.</p>
+			<h2>Skontrolujte popisy obrázkov</h2>
+			<p>Popisy pripravil systém. Opravte len to, čo nesedí.</p>
 			<div id="sba-alt-fields"></div>
 			<div class="sba-modal-actions">
-				<button type="button" id="sba-alt-suggest" class="button">🤖 Navrhnúť AI alt texty</button>
-				<button type="button" id="sba-alt-save" class="button button-primary">Uložiť</button>
+				<button type="button" id="sba-alt-suggest" class="button" style="display:none;">🤖 Navrhnúť AI alt texty</button>
+				<button type="button" id="sba-alt-save" class="button button-primary">Potvrdiť popisy</button>
 				<button type="button" id="sba-alt-cancel" class="button">Zrušiť</button>
 				<span id="sba-alt-suggest-status" style="margin-left:8px;font-size:12px;color:#646970;"></span>
 			</div>
-			<p style="font-size:11px;color:#8c8f94;margin:8px 0 0;">AI iba navrhuje texty — vždy skontrolujte a upravte pred uložením. Prázdne pole u dekoratívneho obrázka je v poriadku.</p>
+			<p style="font-size:11px;color:#8c8f94;margin:8px 0 0;">Prázdne pole pri dekoratívnom obrázku je v poriadku.</p>
 		</div>
 	</div>
 	<?php

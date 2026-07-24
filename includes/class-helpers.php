@@ -247,6 +247,68 @@ function sba_pdf_suggest_alt_text( string $thumb_b64, string $doc_title, int $pa
 	return [ 'alt' => $alt, 'decorative' => $alt === '' ];
 }
 
+/**
+ * Background AI pass after upload. Stores suggestions only; no PDF or public
+ * attachment data changes until an editor confirms them in the review modal.
+ */
+function sba_pdf_auto_suggest_alts( int $id ): void {
+	if ( ! sba_pdf_openai_api_key() ) {
+		return;
+	}
+
+	$path = get_attached_file( $id );
+	if ( ! $path || ! file_exists( $path ) ) {
+		return;
+	}
+	$images_result = sba_pdf_run( 'images', $path );
+	$images        = is_array( $images_result ) ? ( $images_result['images'] ?? [] ) : [];
+	if ( ! $images ) {
+		return;
+	}
+
+	$stored    = (array) get_post_meta( $id, SBA_PDF_A11Y_ALT_META_KEY, true );
+	$next      = (int) get_post_meta( $id, '_sba_pdf_ai_alt_next', true );
+	$pending   = array_values( array_filter( array_keys( $images ), static function ( int $index ) use ( $stored ): bool {
+		return ! array_key_exists( $index, $stored );
+	} ) );
+	$batch     = array_slice( $pending, 0, SBA_PDF_A11Y_OPENAI_MAX_PER_REQUEST );
+	$title     = (string) get_the_title( $id );
+	$review    = false;
+
+	foreach ( $batch as $index ) {
+		if ( array_key_exists( $index, $stored ) ) {
+			continue;
+		}
+		$image = $images[ $index ];
+		$ai    = sba_pdf_suggest_alt_text( (string) ( $image['thumb'] ?? '' ), $title, (int) ( $image['page'] ?? 0 ) );
+		if ( isset( $ai['alt'] ) ) {
+			$stored[ $index ] = $ai['alt'];
+			$review = $review || $ai['alt'] !== '';
+		}
+	}
+
+	update_post_meta( $id, SBA_PDF_A11Y_ALT_META_KEY, $stored );
+	if ( count( $pending ) > count( $batch ) ) {
+		update_post_meta( $id, '_sba_pdf_ai_alt_next', $next + count( $batch ) );
+		wp_schedule_single_event( time() + 5, 'sba_pdf_auto_suggest_async', [ $id ] );
+		return;
+	}
+	delete_post_meta( $id, '_sba_pdf_ai_alt_next' );
+
+	foreach ( $stored as $alt ) {
+		if ( trim( (string) $alt ) !== '' ) {
+			$review = true;
+			break;
+		}
+	}
+	$meta = sba_pdf_get_meta( $id );
+	$meta['review_required'] = $review;
+	$meta['ai_alts_ready_at'] = current_time( 'mysql' );
+	sba_pdf_save_meta( $id, $meta );
+}
+
+add_action( 'sba_pdf_auto_suggest_async', 'sba_pdf_auto_suggest_alts' );
+
 // ─── Meta management ──────────────────────────────────────────────────────
 
 function sba_pdf_save_meta( int $id, array $data ): void {
@@ -416,10 +478,17 @@ function sba_pdf_compute_status( array $meta ): array {
 		];
 	}
 
+	if ( ! empty( $meta['review_required'] ) ) {
+		return [
+			'level'  => 'yellow',
+			'label'  => 'Skontrolujte obrázky',
+		];
+	}
+
 	if ( empty( $meta['tagged_pdf'] ) ) {
 		return [
 			'level'  => 'yellow',
-			'label'  => 'PDF nemá tagovanú štruktúru',
+			'label'  => 'Pripravujeme PDF',
 		];
 	}
 

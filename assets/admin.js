@@ -25,7 +25,8 @@
 			if (!meta || !meta.checked_at) return { level: 'red', label: 'Vyžaduje spracovanie' };
 			if (meta.status === 'pending') return { level: 'red', label: 'Čaká na spracovanie…' };
 			if (!meta.has_text || !meta.fonts_embedded || !meta.meta_title || !meta.meta_lang) return { level: 'red', label: 'Vyžaduje spracovanie' };
-			if (!meta.tagged_pdf) return { level: 'yellow', label: 'PDF nemá tagovanú štruktúru' };
+			if (meta.review_required) return { level: 'yellow', label: 'Skontrolujte obrázky' };
+			if (!meta.tagged_pdf) return { level: 'yellow', label: 'Pripravujeme PDF' };
 			var miss = parseInt(meta.images_without_alt || 0, 10);
 			if (miss > 0) return { level: 'yellow', label: 'Chýbajú alt texty (' + miss + ')' };
 			return { level: 'green', label: 'Pripravené' };
@@ -46,7 +47,7 @@
 				actionDiv.html('<button type="button" class="button button-primary sba-action-btn sba-process-btn" data-id="' + id + '">Spracovať</button>');
 			} else if (st.level === 'yellow') {
 				var yellowImgCount = card.data('images') || 0;
-				actionDiv.html('<button type="button" class="button button-primary sba-action-btn sba-alts-btn" data-id="' + id + '" data-images="' + yellowImgCount + '">Dopísať alt texty</button>');
+				actionDiv.html('<button type="button" class="button button-primary sba-action-btn sba-alts-btn" data-id="' + id + '" data-images="' + yellowImgCount + '">Skontrolovať obrázky</button>');
 			} else {
 				var greenImgCount = card.data('images') || 0;
 				actionDiv.html(greenImgCount ? '<button type="button" class="button button-small sba-action-btn sba-alts-btn" data-id="' + id + '" data-images="' + greenImgCount + '">Alt texty</button>' : '');
@@ -159,7 +160,7 @@
 		// ─── Alt text modal ───────────────────────────────────────────────
 		var altCurrentId = null;
 
-		function renderAltFields(images) {
+		function renderAltFields(images, suggestedAlts) {
 			var fields = '';
 			images.forEach(function (img, n) {
 				var thumb = img.thumb
@@ -168,10 +169,11 @@
 				var label = 'Strana ' + img.page + ', obrázok ' + img.index;
 				if (img.has_alt) { label += ' <span style="color:#0a3622;font-size:11px;">✓</span>'; }
 				var xrefAttr = img.struct_fig_xref ? ' data-struct-xref="' + parseInt(img.struct_fig_xref, 10) + '"' : '';
+				var suggested = suggestedAlts && suggestedAlts[n] !== undefined ? suggestedAlts[n] : '';
 				fields += '<div style="margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid #f0f0f0;">'
 					+ thumb
 					+ '<label style="display:block;font-weight:600;margin-bottom:4px;">' + label + '</label>'
-					+ '<input type="text" class="widefat sba-alt-input" data-index="' + n + '"' + xrefAttr + ' placeholder="Popíšte obrázok…" style="width:100%;">'
+					+ '<input type="text" class="widefat sba-alt-input" data-index="' + n + '"' + xrefAttr + ' placeholder="Popíšte obrázok…" value="' + $('<div>').text(suggested).html() + '" style="width:100%;">'
 					+ '</div>';
 			});
 			$('#sba-alt-fields').html(fields);
@@ -201,7 +203,7 @@
 						? '<p style="font-size:12px;color:#0a3622;background:#d1e7dd;padding:8px 12px;border-radius:4px;margin:0 0 12px;">Alt texty sa zapíšu priamo do PDF (dokument má tagovanú štruktúru).</p>'
 						: '<p style="font-size:12px;color:#664d03;background:#fff3cd;padding:8px 12px;border-radius:4px;margin:0 0 12px;">Alt texty sa uložia do databázy (dokument nie je tagovaný).</p>';
 					if (imgs && imgs.length) {
-						renderAltFields(imgs);
+						renderAltFields(imgs, r.data.suggested_alts || {});
 					} else {
 						renderAltFieldsFallback(imageCount);
 					}

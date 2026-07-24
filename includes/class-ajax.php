@@ -203,6 +203,8 @@ function sba_pdf_ajax_save_alts(): void {
 	$meta                    = sba_pdf_get_meta( $id );
 	$meta['alt_embed_status'] = $embed_status;
 	$meta['alt_embed_count']  = $embed_count;
+	$meta['review_required']  = false;
+	$meta['alts_confirmed_at'] = current_time( 'mysql' );
 	sba_pdf_save_meta( $id, $meta );
 
 	wp_send_json_success( [
@@ -242,6 +244,7 @@ function sba_pdf_ajax_images(): void {
 	if ( ! empty( $meta['tagged_pdf'] ) || ! empty( $meta['localtag_pdfinfo'] ) || ! empty( $meta['autotagged_at'] ) ) {
 		$result['tagged_pdf'] = true;
 	}
+	$result['suggested_alts'] = (array) get_post_meta( $id, SBA_PDF_A11Y_ALT_META_KEY, true );
 
 	wp_send_json_success( $result );
 }
