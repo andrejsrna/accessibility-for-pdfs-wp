@@ -13,6 +13,30 @@ add_action( 'wp_ajax_sba_pdf_images',           'sba_pdf_ajax_images' );
 add_action( 'wp_ajax_sba_pdf_autotag',          'sba_pdf_ajax_autotag' );
 add_action( 'wp_ajax_sba_pdf_localtag',         'sba_pdf_ajax_localtag' );
 add_action( 'wp_ajax_sba_pdf_suggest_alts',     'sba_pdf_ajax_suggest_alts' );
+add_action( 'wp_ajax_sba_pdf_queue_all',        'sba_pdf_ajax_queue_all' );
+
+/** Queue every incomplete PDF server-side. Browser pagination must never
+ * decide the bulk scope. Jobs are staggered to avoid concurrent OCR/API work. */
+function sba_pdf_ajax_queue_all(): void {
+	check_ajax_referer( 'sba_pdf_a11y', 'nonce' );
+	if ( ! current_user_can( 'upload_files' ) ) {
+		wp_die( '', 403 );
+	}
+
+	$queued = 0;
+	foreach ( sba_pdf_get_all( 1, 9999 ) as $attachment ) {
+		if ( sba_pdf_compute_status( sba_pdf_get_meta( $attachment->ID ) )['level'] !== 'red' ) {
+			continue;
+		}
+		if ( wp_next_scheduled( 'sba_pdf_auto_process_async', [ $attachment->ID ] ) ) {
+			continue;
+		}
+		wp_schedule_single_event( time() + ( $queued * MINUTE_IN_SECONDS ), 'sba_pdf_auto_process_async', [ $attachment->ID ] );
+		$queued++;
+	}
+
+	wp_send_json_success( [ 'queued' => $queued ] );
+}
 
 // ─── Check ─────────────────────────────────────────────────────────────────
 

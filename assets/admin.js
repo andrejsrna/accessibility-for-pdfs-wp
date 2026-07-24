@@ -115,46 +115,20 @@
 			}
 		});
 
-		// Process all pending (red) files
+		// Queue all incomplete PDFs server-side. Current-page cards are only a view.
 		$('#sba-btn-process-all').on('click', function () {
 			var btn = $(this);
-			var ids = $('.sba-card[data-level="red"]').map(function () { return $(this).data('id'); }).get();
-			if (!ids.length) { showNotice('Nie sú žiadne súbory na spracovanie.', 'success'); return; }
-
-			btn.prop('disabled', true).text('Spracúva sa…');
-			$('#sba-progress').show();
-			$('#sba-prog-tot').text(ids.length);
-			$('#sba-prog-cur').text(0);
-
-			var i = 0;
-			var errors = 0;
-			function next() {
-				if (i >= ids.length) {
-					btn.prop('disabled', false).text('Spracovať všetky nedokončené');
-					$('#sba-progress').hide();
-					var doneMsg = 'Hotovo: ' + ids.length + ' súborov spracovaných.';
-					if (errors > 0) { doneMsg += ' (' + errors + ' s chybou)'; showNotice(doneMsg, 'warning'); }
-					else { showNotice(doneMsg, 'success'); }
-					return;
-				}
-				var id = ids[i];
-				$('#sba-prog-cur').text(i + 1);
-				var card = $('#sba-row-' + id);
-				card.find('.sba-card-label').html('<span class="sba-spin"></span>');
-
-				$.post(ajaxUrl, { action: 'sba_pdf_process', nonce: nonce, id: id, lang: getLang(id) })
-					.done(function (r) {
-						if (r.success && r.data.status) {
-							refreshCard(id, r.data.status);
-						} else {
-							errors++;
-							refreshCard(id, {});
-						}
-					})
-					.fail(function () { errors++; })
-					.always(function () { i++; next(); });
-			}
-			next();
+			btn.prop('disabled', true).text('Zaraďujem…');
+			$.post(ajaxUrl, { action: 'sba_pdf_queue_all', nonce: nonce })
+				.done(function (r) {
+					if (r.success) {
+						showNotice('Zaradených ' + (r.data.queued || 0) + ' PDF. Spracovanie pokračuje automaticky na pozadí.', 'success');
+					} else {
+						showNotice('Nepodarilo sa zaradiť PDF na spracovanie.', 'error');
+					}
+				})
+				.fail(function () { showNotice('Požiadavka zlyhala.', 'error'); })
+				.always(function () { btn.prop('disabled', false).text('Spracovať všetky nedokončené'); });
 		});
 
 		// ─── Alt text modal ───────────────────────────────────────────────
