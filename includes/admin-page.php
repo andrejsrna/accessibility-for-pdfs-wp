@@ -125,9 +125,12 @@ function sba_pdf_render_alt_modal(): void {
 			<p>Popíšte obsah každého obrázka pre používateľov čítačiek obrazovky.</p>
 			<div id="sba-alt-fields"></div>
 			<div class="sba-modal-actions">
+				<button type="button" id="sba-alt-suggest" class="button">🤖 Navrhnúť AI alt texty</button>
 				<button type="button" id="sba-alt-save" class="button button-primary">Uložiť</button>
 				<button type="button" id="sba-alt-cancel" class="button">Zrušiť</button>
+				<span id="sba-alt-suggest-status" style="margin-left:8px;font-size:12px;color:#646970;"></span>
 			</div>
+			<p style="font-size:11px;color:#8c8f94;margin:8px 0 0;">AI iba navrhuje texty — vždy skontrolujte a upravte pred uložením. Prázdne pole u dekoratívneho obrázka je v poriadku.</p>
 		</div>
 	</div>
 	<?php

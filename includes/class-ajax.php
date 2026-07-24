@@ -12,6 +12,7 @@ add_action( 'wp_ajax_sba_pdf_save_meta_title',  'sba_pdf_ajax_save_meta_title' )
 add_action( 'wp_ajax_sba_pdf_images',           'sba_pdf_ajax_images' );
 add_action( 'wp_ajax_sba_pdf_autotag',          'sba_pdf_ajax_autotag' );
 add_action( 'wp_ajax_sba_pdf_localtag',         'sba_pdf_ajax_localtag' );
+add_action( 'wp_ajax_sba_pdf_suggest_alts',     'sba_pdf_ajax_suggest_alts' );
 
 // ─── Check ─────────────────────────────────────────────────────────────────
 
@@ -22,6 +23,7 @@ function sba_pdf_ajax_check(): void {
 	}
 
 	$id   = intval( $_POST['id'] ?? 0 );
+	sba_pdf_require_editable_attachment( $id );
 	$path = $id ? get_attached_file( $id ) : '';
 
 	if ( ! $path || ! file_exists( $path ) ) {
@@ -51,6 +53,7 @@ function sba_pdf_ajax_process(): void {
 	}
 
 	$id         = intval( $_POST['id'] ?? 0 );
+	sba_pdf_require_editable_attachment( $id );
 	$attachment = $id ? get_post( $id ) : null;
 	$path       = $attachment ? get_attached_file( $id ) : '';
 
@@ -74,6 +77,11 @@ function sba_pdf_ajax_process(): void {
 	$result = sba_pdf_run( 'process', $path, $opts );
 	if ( null === $result ) {
 		wp_send_json_error( 'Python skript zlyhal alebo nie je nainštalovaný.' );
+	}
+	if ( ! empty( $result['busy'] ) ) {
+		// Do not touch stored status meta: a concurrent run (cron or another
+		// request) already owns this file, so there is nothing new to save.
+		wp_send_json_error( (string) $result['error'] );
 	}
 
 	// Save fresh status from "final" key produced by process action.
@@ -115,6 +123,7 @@ function sba_pdf_ajax_save_meta_title(): void {
 
 	$id    = intval( $_POST['id'] ?? 0 );
 	$title = sanitize_text_field( $_POST['title'] ?? '' );
+	sba_pdf_require_editable_attachment( $id );
 
 	if ( ! $id ) {
 		wp_send_json_error( 'Neplatné ID.' );
@@ -125,12 +134,16 @@ function sba_pdf_ajax_save_meta_title(): void {
 		wp_send_json_error( 'Súbor nenájdený.' );
 	}
 
-	// Write new title into PDF metadata via Python script
-	sba_pdf_run( 'process', $path, [
+	// Metadata-only editing must not re-run OCR, Ghostscript or bookmark detection.
+	$result = sba_pdf_run( 'metadata', $path, [
 		'title'  => $title,
 		'author' => get_bloginfo( 'name' ),
 		'lang'   => 'slk+eng',
 	] );
+	if ( ! is_array( $result ) || empty( $result['updated'] ) ) {
+		$detail = is_array( $result ) ? sba_pdf_safe_error_detail( (string) ( $result['error'] ?? $result['raw'] ?? '' ) ) : '';
+		wp_send_json_error( $detail !== '' ? 'Meta titul sa nepodarilo zapísať: ' . $detail : 'Meta titul sa nepodarilo zapísať.' );
+	}
 
 	// Update stored meta state
 	$meta = sba_pdf_get_meta( $id );
@@ -150,6 +163,7 @@ function sba_pdf_ajax_save_alts(): void {
 	}
 
 	$id          = intval( $_POST['id'] ?? 0 );
+	sba_pdf_require_editable_attachment( $id );
 	$alts        = $_POST['alts'] ?? [];
 	$struct_xrefs = $_POST['struct_xrefs'] ?? [];
 
@@ -207,6 +221,7 @@ function sba_pdf_ajax_images(): void {
 	}
 
 	$id   = intval( $_POST['id'] ?? 0 );
+	sba_pdf_require_editable_attachment( $id );
 	$path = $id ? get_attached_file( $id ) : '';
 
 	if ( ! $path || ! file_exists( $path ) ) {
@@ -240,6 +255,7 @@ function sba_pdf_ajax_autotag(): void {
 	}
 
 	$id   = intval( $_POST['id'] ?? 0 );
+	sba_pdf_require_editable_attachment( $id );
 	$path = $id ? get_attached_file( $id ) : '';
 
 	if ( ! $path || ! file_exists( $path ) ) {
@@ -297,6 +313,7 @@ function sba_pdf_ajax_localtag(): void {
 	}
 
 	$id         = intval( $_POST['id'] ?? 0 );
+	sba_pdf_require_editable_attachment( $id );
 	$attachment = $id ? get_post( $id ) : null;
 	$path       = $attachment ? get_attached_file( $id ) : '';
 	$lang       = sanitize_text_field( $_POST['lang'] ?? 'slk+eng' );
@@ -345,4 +362,63 @@ function sba_pdf_ajax_localtag(): void {
 		$message .= ' Detail: ' . $detail;
 	}
 	wp_send_json_error( $message );
+}
+
+// ─── AI alt-text suggestions ───────────────────────────────────────────────
+
+function sba_pdf_ajax_suggest_alts(): void {
+	check_ajax_referer( 'sba_pdf_a11y', 'nonce' );
+	if ( ! current_user_can( 'upload_files' ) ) {
+		wp_die( '', 403 );
+	}
+
+	$id = intval( $_POST['id'] ?? 0 );
+	sba_pdf_require_editable_attachment( $id );
+	$path = $id ? get_attached_file( $id ) : '';
+
+	if ( ! $path || ! file_exists( $path ) ) {
+		wp_send_json_error( 'Súbor nenájdený.' );
+	}
+	if ( ! sba_pdf_openai_api_key() ) {
+		wp_send_json_error( 'AI návrhy nie sú nastavené (chýba OPENAI_API_KEY).' );
+	}
+
+	// The client tells us which rows are still empty in its modal — this is
+	// the source of truth for "needs a suggestion", not the PDF's on-disk
+	// alt status, so re-clicking after a manual edit never re-suggests it.
+	$indices = isset( $_POST['indices'] ) && is_array( $_POST['indices'] )
+		? array_values( array_unique( array_map( 'intval', $_POST['indices'] ) ) )
+		: [];
+	if ( ! $indices ) {
+		wp_send_json_error( 'Žiadne obrázky na návrh.' );
+	}
+
+	$result = sba_pdf_run( 'images', $path );
+	if ( ! is_array( $result ) || empty( $result['images'] ) ) {
+		wp_send_json_error( 'Nepodarilo sa načítať obrázky z PDF.' );
+	}
+	$images = $result['images'];
+
+	// Cap per request: sequential OpenAI calls inside one PHP-FPM request
+	// must fit comfortably under the web server's execution time limit.
+	// The UI re-runs this for whatever remains empty after each batch.
+	$batch     = array_slice( $indices, 0, SBA_PDF_A11Y_OPENAI_MAX_PER_REQUEST );
+	$remaining = max( 0, count( $indices ) - count( $batch ) );
+
+	$attachment = get_post( $id );
+	$doc_title  = $attachment ? trim( (string) $attachment->post_title ) : '';
+
+	$suggestions = [];
+	foreach ( $batch as $idx ) {
+		if ( ! isset( $images[ $idx ] ) ) {
+			continue;
+		}
+		$img        = $images[ $idx ];
+		$suggestion = sba_pdf_suggest_alt_text( (string) ( $img['thumb'] ?? '' ), $doc_title, (int) ( $img['page'] ?? 0 ) );
+		$suggestions[ $idx ] = isset( $suggestion['alt'] )
+			? [ 'alt' => $suggestion['alt'], 'decorative' => ! empty( $suggestion['decorative'] ) ]
+			: [ 'error' => $suggestion['error'] ?? 'Neznáma chyba.' ];
+	}
+
+	wp_send_json_success( [ 'suggestions' => $suggestions, 'remaining' => $remaining ] );
 }

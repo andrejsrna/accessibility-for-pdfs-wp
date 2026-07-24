@@ -56,18 +56,25 @@ def check_pdf(path: str) -> dict:
         result["meta_subject"] = meta.get("subject", "")
         result["meta_lang"] = doc.language or ""
 
-        # Check images and alt texts
+        # Count image instances, then inspect /Alt directly on /Figure elements.
+        # PyMuPDF's raw image dictionary does not reliably expose PDF structure
+        # attributes, so it cannot be the source of truth for PDF alt text.
+        image_total = 0
         for page in doc:
             image_list = page.get_images(full=True)
             for img_ref in image_list:
                 result["has_images"] = True
-                xref = img_ref[0]
-                # Check if image is inside a figure tag with Alt
-                has_alt = _image_has_alt(doc, page, xref)
-                if has_alt:
-                    result["images_with_alt"] += 1
-                else:
-                    result["images_without_alt"] += 1
+                image_total += 1
+
+        if image_total:
+            alt_count = 0
+            if result["tagged_pdf"]:
+                for figure_xref in _struct_figures_ordered(doc):
+                    _kind, alt = doc.xref_get_key(figure_xref, "Alt")
+                    if alt and alt.strip("()"):
+                        alt_count += 1
+            result["images_with_alt"] = min(image_total, alt_count)
+            result["images_without_alt"] = max(0, image_total - alt_count)
 
         # Check font embedding
         for page in doc:
@@ -612,6 +619,9 @@ def extract_image_previews(path: str, max_images: int = 30) -> dict:
         figs = _struct_figures_ordered(doc)
         for i, img in enumerate(images):
             img['struct_fig_xref'] = figs[i] if i < len(figs) else None
+            if img['struct_fig_xref']:
+                _kind, alt = doc.xref_get_key(img['struct_fig_xref'], "Alt")
+                img['has_alt'] = bool(alt and alt.strip("()"))
     else:
         for img in images:
             img['struct_fig_xref'] = None
@@ -778,26 +788,24 @@ def detect_and_set_bookmarks(path: str) -> dict:
     return {"bookmarks_added": len(toc), "toc": toc[:10]}  # Return first 10 as preview
 
 
-def process_pdf(args) -> dict:
-    """Full accessibility processing pipeline."""
+def _process_pdf_in_place(args) -> dict:
+    """Full accessibility processing pipeline on an already-isolated work file."""
     path = args.input
     report = {"input": path, "steps": []}
 
-    # Step 1: OCR (if needed)
+    # Step 1: OCR. --skip-text preserves already searchable pages while also
+    # processing scanned pages in mixed PDFs.
     status_before = check_pdf(path)
-    if not status_before.get("has_text"):
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            tmp_path = tmp.name
-        ocr = run_ocr(path, tmp_path, args.lang)
-        if ocr["success"] and os.path.exists(tmp_path):
-            shutil.move(tmp_path, path)
-            report["steps"].append({"step": "ocr", "status": "done"})
-        else:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            report["steps"].append({"step": "ocr", "status": "error", "detail": ocr.get("stderr", "")})
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp_path = tmp.name
+    ocr = run_ocr(path, tmp_path, args.lang)
+    if ocr["success"] and os.path.exists(tmp_path):
+        shutil.move(tmp_path, path)
+        report["steps"].append({"step": "ocr", "status": "done"})
     else:
-        report["steps"].append({"step": "ocr", "status": "skipped", "reason": "already has text"})
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        report["steps"].append({"step": "ocr", "status": "error", "detail": ocr.get("stderr", "")})
 
     # Step 2: Font embedding (via ghostscript)
     if args.embed_fonts:
@@ -843,9 +851,27 @@ def process_pdf(args) -> dict:
     return report
 
 
+def process_pdf(args) -> dict:
+    """Run the pipeline on a sibling work file and replace the original only at the end."""
+    original = args.input
+    work = f"{original}.sba-work-{os.getpid()}"
+    shutil.copy2(original, work)
+    try:
+        args.input = work
+        report = _process_pdf_in_place(args)
+        os.replace(work, original)
+        report["input"] = original
+        report["atomic_replace"] = True
+        return report
+    finally:
+        args.input = original
+        if os.path.exists(work):
+            os.unlink(work)
+
+
 def main():
     parser = argparse.ArgumentParser(description="PDF Accessibility Processor")
-    parser.add_argument("action", choices=["check", "process", "images", "write-alts", "autotag", "localtag"])
+    parser.add_argument("action", choices=["check", "process", "metadata", "images", "write-alts", "autotag", "localtag"])
     parser.add_argument("--input", required=True, help="Path to PDF file")
     parser.add_argument("--title", default="", help="Document title for metadata")
     parser.add_argument("--author", default="", help="Author for metadata")
@@ -866,6 +892,14 @@ def main():
 
     if args.action == "check":
         print(json.dumps(check_pdf(args.input)))
+    elif args.action == "metadata":
+        try:
+            lang_code = args.lang.split("+")[0]
+            lang_iso = {"slk": "sk", "eng": "en", "deu": "de", "ces": "cs"}.get(lang_code, lang_code)
+            set_metadata(args.input, title=args.title, author=args.author, subject=args.subject, lang=lang_iso)
+            print(json.dumps({"updated": True, "final": check_pdf(args.input)}))
+        except Exception as exc:
+            print(json.dumps({"updated": False, "error": str(exc)[:300]}))
     elif args.action == "images":
         print(json.dumps(extract_image_previews(args.input)))
     elif args.action == "write-alts":

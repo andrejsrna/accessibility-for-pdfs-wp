@@ -31,66 +31,220 @@ function sba_pdf_count_all(): int {
 
 // ─── Python process runner ────────────────────────────────────────────────
 
+const SBA_PDF_MUTATING_ACTIONS = [ 'process', 'metadata', 'write-alts', 'autotag', 'localtag' ];
+
+/**
+ * Serialize writes to a given PDF so the WP-Cron auto-processor and a manual
+ * admin click can never run the Python pipeline on the same file at once.
+ * Uses a non-blocking flock so a busy request fails fast instead of queueing
+ * behind a long-running OCR job.
+ */
+function sba_pdf_acquire_lock( string $path ) {
+	$lock_path = sys_get_temp_dir() . '/sba_pdf_lock_' . md5( $path ) . '.lock';
+	$handle    = fopen( $lock_path, 'c' );
+	if ( ! $handle ) {
+		return null;
+	}
+	if ( ! flock( $handle, LOCK_EX | LOCK_NB ) ) {
+		fclose( $handle );
+		return false;
+	}
+	return $handle;
+}
+
+function sba_pdf_release_lock( $handle ): void {
+	if ( is_resource( $handle ) ) {
+		flock( $handle, LOCK_UN );
+		fclose( $handle );
+	}
+}
+
 function sba_pdf_run( string $action, string $path, array $opts = [] ): ?array {
 	if ( ! function_exists( 'shell_exec' ) ) {
 		return [ 'error' => 'shell_exec je zakázaný v php.ini' ];
 	}
 
-	$python = escapeshellcmd( '/usr/bin/python3' );
-	$script = escapeshellarg( SBA_PDF_A11Y_PYTHON_SCRIPT );
-	$file   = escapeshellarg( $path );
-	$cmd    = "$python $script " . escapeshellarg( $action ) . " --input $file";
-
-	if ( ! empty( $opts['title'] ) ) {
-		$cmd .= ' --title ' . escapeshellarg( $opts['title'] );
-	}
-	if ( ! empty( $opts['author'] ) ) {
-		$cmd .= ' --author ' . escapeshellarg( $opts['author'] );
-	}
-	if ( ! empty( $opts['subject'] ) ) {
-		$cmd .= ' --subject ' . escapeshellarg( $opts['subject'] );
-	}
-	if ( ! empty( $opts['lang'] ) ) {
-		$cmd .= ' --lang ' . escapeshellarg( $opts['lang'] );
-	}
-	if ( ! empty( $opts['shift_headings'] ) ) {
-		$cmd .= ' --shift-headings';
-	}
-
-	// alts_json: write to temp file to avoid shell argument length limits
-	$tmp_json = null;
-	if ( ! empty( $opts['alts_json'] ) ) {
-		$tmp_json = tempnam( sys_get_temp_dir(), 'sba_alts_' ) . '.json';
-		file_put_contents( $tmp_json, $opts['alts_json'] );
-		$cmd .= ' --alts-file ' . escapeshellarg( $tmp_json );
-	}
-
-	$cmd   .= ' 2>&1';
-	$output = shell_exec( $cmd );
-
-	if ( $tmp_json && file_exists( $tmp_json ) ) {
-		@unlink( $tmp_json );
-	}
-
-	if ( $output === null || trim( $output ) === '' ) {
-		return null;
-	}
-
-	$trimmed = trim( $output );
-	$decoded = json_decode( $trimmed, true );
-	if ( is_array( $decoded ) ) {
-		return $decoded;
-	}
-
-	// Some SDKs/libraries emit warnings before JSON. Try to recover the last JSON object.
-	if ( preg_match( '/(\{.*\})\s*$/s', $trimmed, $m ) ) {
-		$decoded = json_decode( $m[1], true );
-		if ( is_array( $decoded ) ) {
-			return $decoded;
+	$lock = null;
+	if ( in_array( $action, SBA_PDF_MUTATING_ACTIONS, true ) ) {
+		$lock = sba_pdf_acquire_lock( $path );
+		if ( $lock === false ) {
+			return [ 'error' => 'Súbor sa práve spracováva (cron alebo iná požiadavka), skúste to o chvíľu.', 'busy' => true ];
 		}
 	}
 
-	return [ 'raw' => $output ];
+	try {
+		$python = escapeshellcmd( '/usr/bin/python3' );
+		$script = escapeshellarg( SBA_PDF_A11Y_PYTHON_SCRIPT );
+		$file   = escapeshellarg( $path );
+		$cmd    = "$python $script " . escapeshellarg( $action ) . " --input $file";
+
+		if ( ! empty( $opts['title'] ) ) {
+			$cmd .= ' --title ' . escapeshellarg( $opts['title'] );
+		}
+		if ( ! empty( $opts['author'] ) ) {
+			$cmd .= ' --author ' . escapeshellarg( $opts['author'] );
+		}
+		if ( ! empty( $opts['subject'] ) ) {
+			$cmd .= ' --subject ' . escapeshellarg( $opts['subject'] );
+		}
+		if ( ! empty( $opts['lang'] ) ) {
+			$cmd .= ' --lang ' . escapeshellarg( $opts['lang'] );
+		}
+		if ( ! empty( $opts['shift_headings'] ) ) {
+			$cmd .= ' --shift-headings';
+		}
+
+		// alts_json: write to temp file to avoid shell argument length limits
+		$tmp_json = null;
+		if ( ! empty( $opts['alts_json'] ) ) {
+			$tmp_json = tempnam( sys_get_temp_dir(), 'sba_alts_' );
+			if ( false === $tmp_json || false === file_put_contents( $tmp_json, $opts['alts_json'], LOCK_EX ) ) {
+				return [ 'error' => 'Nepodarilo sa pripraviť dočasné dáta alt textov.' ];
+			}
+			$cmd .= ' --alts-file ' . escapeshellarg( $tmp_json );
+		}
+
+		$cmd   .= ' 2>&1';
+		$output = shell_exec( $cmd );
+
+		if ( $tmp_json && file_exists( $tmp_json ) ) {
+			@unlink( $tmp_json );
+		}
+
+		if ( $output === null || trim( $output ) === '' ) {
+			return null;
+		}
+
+		$trimmed = trim( $output );
+		$decoded = json_decode( $trimmed, true );
+		if ( is_array( $decoded ) ) {
+			return $decoded;
+		}
+
+		// Some SDKs/libraries emit warnings before JSON. Try to recover the last JSON object.
+		if ( preg_match( '/(\{.*\})\s*$/s', $trimmed, $m ) ) {
+			$decoded = json_decode( $m[1], true );
+			if ( is_array( $decoded ) ) {
+				return $decoded;
+			}
+		}
+
+		return [ 'raw' => $output ];
+	} finally {
+		sba_pdf_release_lock( $lock );
+	}
+}
+
+/**
+ * Enforce both attachment ownership/capabilities and the expected file type.
+ * `upload_files` alone lets Authors upload files but does not allow changing
+ * another author's attachment.
+ */
+function sba_pdf_require_editable_attachment( int $id ): void {
+	if ( ! $id || get_post_mime_type( $id ) !== 'application/pdf' || ! current_user_can( 'edit_post', $id ) ) {
+		wp_die( '', 403 );
+	}
+}
+
+// ─── AI alt-text suggestions (OpenAI vision) ───────────────────────────────
+//
+// Reuses the same API key/model resolution and prompt style as the WP-CLI
+// image ALT generator in wp-content/mu-plugins/sba-alt-generator.php so
+// suggestions read consistently whether they came from a regular image or
+// a PDF page image. Suggestions are never written automatically — the admin
+// UI only pre-fills the alt-text modal; the editor still reviews and saves.
+
+define( 'SBA_PDF_A11Y_OPENAI_API_URL', 'https://api.openai.com/v1/chat/completions' );
+define( 'SBA_PDF_A11Y_OPENAI_MAX_PER_REQUEST', 8 );
+
+function sba_pdf_openai_api_key(): string {
+	if ( defined( 'SBA_ALT_OPENAI_API_KEY' ) && SBA_ALT_OPENAI_API_KEY ) {
+		return trim( (string) SBA_ALT_OPENAI_API_KEY );
+	}
+	$env = getenv( 'OPENAI_API_KEY' );
+	return is_string( $env ) ? trim( $env ) : '';
+}
+
+function sba_pdf_openai_model(): string {
+	if ( defined( 'SBA_ALT_OPENAI_MODEL' ) && SBA_ALT_OPENAI_MODEL ) {
+		return trim( (string) SBA_ALT_OPENAI_MODEL );
+	}
+	$env = getenv( 'SBA_ALT_OPENAI_MODEL' );
+	return ( is_string( $env ) && trim( $env ) !== '' ) ? trim( $env ) : 'gpt-4.1-mini';
+}
+
+/**
+ * Ask OpenAI vision for one PDF image's alt text. An empty 'alt' means the
+ * model judged the image purely decorative — that is a valid suggestion,
+ * not a failure, and the UI must not treat it as an error.
+ */
+function sba_pdf_suggest_alt_text( string $thumb_b64, string $doc_title, int $page ): array {
+	$api_key = sba_pdf_openai_api_key();
+	if ( ! $api_key ) {
+		return [ 'error' => 'Chýba OPENAI_API_KEY na serveri.' ];
+	}
+	if ( $thumb_b64 === '' ) {
+		return [ 'error' => 'Náhľad obrázka nie je dostupný.' ];
+	}
+
+	$instructions = implode( "\n", array_filter( [
+		'Vygeneruj ALT text v slovenčine pre obrázok zo strany PDF dokumentu.',
+		'Vráť iba samotný ALT text bez úvodzoviek, vysvetlení a markdownu.',
+		'Buď konkrétny, stručný a vecný. Maximálne 125 znakov.',
+		'Nepoužívaj frázy ako "obrázok", "fotografia", "na obrázku je", pokiaľ nie sú nevyhnutné.',
+		'Ak je dôležitý text priamo v obrázku (napr. graf, schéma), zahrň jeho zmysel stručne.',
+		'Ak je obrázok čisto dekoratívny (pozadie, oddeľovač, logo, ozdobný prvok bez informačnej hodnoty), vráť prázdny reťazec.',
+		$doc_title !== '' ? 'Názov dokumentu: ' . $doc_title : '',
+		'Strana v dokumente: ' . $page,
+	] ) );
+
+	$payload = [
+		'model'       => sba_pdf_openai_model(),
+		'messages'    => [
+			[
+				'role'    => 'user',
+				'content' => [
+					[ 'type' => 'text', 'text' => $instructions ],
+					[ 'type' => 'image_url', 'image_url' => [ 'url' => 'data:image/jpeg;base64,' . $thumb_b64 ] ],
+				],
+			],
+		],
+		'max_tokens'  => 120,
+		'temperature' => 0.2,
+	];
+
+	$response = wp_remote_post( SBA_PDF_A11Y_OPENAI_API_URL, [
+		'headers' => [
+			'Authorization' => 'Bearer ' . $api_key,
+			'Content-Type'  => 'application/json',
+		],
+		'body'    => wp_json_encode( $payload ),
+		'timeout' => 40,
+	] );
+
+	if ( is_wp_error( $response ) ) {
+		return [ 'error' => sba_pdf_safe_error_detail( $response->get_error_message() ) ];
+	}
+
+	$code = wp_remote_retrieve_response_code( $response );
+	$body = json_decode( wp_remote_retrieve_body( $response ), true );
+
+	if ( $code < 200 || $code >= 300 ) {
+		$msg = is_array( $body ) ? ( $body['error']['message'] ?? ( 'HTTP ' . $code ) ) : ( 'HTTP ' . $code );
+		return [ 'error' => sba_pdf_safe_error_detail( (string) $msg ) ];
+	}
+
+	$content = $body['choices'][0]['message']['content'] ?? '';
+	if ( ! is_string( $content ) ) {
+		return [ 'error' => 'OpenAI odpoveď nemá očakávaný obsah.' ];
+	}
+
+	$alt = wp_strip_all_tags( $content );
+	$alt = preg_replace( '/\s+/u', ' ', $alt );
+	$alt = trim( (string) $alt, " \t\n\r\0\x0B\"'" );
+	$alt = function_exists( 'mb_substr' ) ? mb_substr( $alt, 0, 125 ) : substr( $alt, 0, 125 );
+
+	return [ 'alt' => $alt, 'decorative' => $alt === '' ];
 }
 
 // ─── Meta management ──────────────────────────────────────────────────────
@@ -253,11 +407,19 @@ function sba_pdf_compute_status( array $meta ): array {
 	$has_text   = ! empty( $meta['has_text'] );
 	$has_fonts  = ! empty( $meta['fonts_embedded'] );
 	$meta_title = trim( (string) ( $meta['meta_title'] ?? '' ) );
+	$meta_lang  = trim( (string) ( $meta['meta_lang'] ?? '' ) );
 
-	if ( ! $has_text || ! $has_fonts || ! $meta_title ) {
+	if ( ! $has_text || ! $has_fonts || ! $meta_title || ! $meta_lang ) {
 		return [
 			'level'  => 'red',
 			'label'  => 'Vyžaduje spracovanie',
+		];
+	}
+
+	if ( empty( $meta['tagged_pdf'] ) ) {
+		return [
+			'level'  => 'yellow',
+			'label'  => 'PDF nemá tagovanú štruktúru',
 		];
 	}
 
