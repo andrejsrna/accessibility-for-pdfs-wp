@@ -186,7 +186,7 @@
 				.fail(function () { renderAltFieldsFallback(imageCount); });
 		});
 
-		$('#sba-alt-cancel').on('click', function () {
+		$(document).on('click', '#sba-alt-cancel', function () {
 			$('#sba-alt-modal').removeClass('open');
 		});
 
@@ -198,7 +198,7 @@
 			}
 		}
 
-		$('#sba-alt-suggest').on('click', function () {
+		$(document).on('click', '#sba-alt-suggest', function () {
 			var btn = $(this);
 			var status = $('#sba-alt-suggest-status');
 			var emptyInputs = $('.sba-alt-input').filter(function () { return $(this).val().trim() === ''; });
@@ -250,7 +250,7 @@
 				});
 		});
 
-		$('#sba-alt-save').on('click', function () {
+		$(document).on('click', '#sba-alt-save', function () {
 			var alts = {};
 			var structXrefs = {};
 			$('.sba-alt-input').each(function () {
@@ -303,15 +303,15 @@
 			$('#sba-mtitle-count').text(len + ' znakov').css('color', len > 70 ? '#d63638' : '#888');
 		}
 
-		$('#sba-mtitle-input').on('input', function () {
+		$(document).on('input', '#sba-mtitle-input', function () {
 			updateMtitleCount(this.value.length);
 		});
 
-		$('#sba-mtitle-cancel').on('click', function () {
+		$(document).on('click', '#sba-mtitle-cancel', function () {
 			$('#sba-mtitle-modal').removeClass('open');
 		});
 
-		$('#sba-mtitle-save').on('click', function () {
+		$(document).on('click', '#sba-mtitle-save', function () {
 			var title = $('#sba-mtitle-input').val().trim();
 			if (!title) { $('#sba-mtitle-status').css('color', '#d63638').text('Zadajte titul.'); return; }
 			var saveBtn = $(this).prop('disabled', true).text('Ukladám…');
