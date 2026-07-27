@@ -33,9 +33,13 @@ function sba_pdf_attachment_field_html( int $id, array $meta, string $nonce ): s
 	if ( $status['level'] === 'red' ) {
 		$action = '<button type="button" class="button button-primary sba-att-process-btn" style="margin-top:8px;">Spracovať PDF</button>';
 	} elseif ( ! empty( $meta['review_required'] ) ) {
-		$url    = admin_url( 'upload.php?page=sba-pdf-accessibility#sba-row-' . $id );
-		$action = '<a class="button button-primary" style="margin-top:8px;" href="' . esc_attr( $url ) . '">Skontrolovať a potvrdiť</a>';
+		$image_count = (int) ( ( $meta['images_with_alt'] ?? 0 ) + ( $meta['images_without_alt'] ?? 0 ) );
+		$action = '<button type="button" class="button button-primary sba-alts-btn sba-att-review-btn" data-id="' . $id . '" data-images="' . $image_count . '" style="margin-top:8px;">Skontrolovať a potvrdiť</button>';
 	}
+
+	ob_start();
+	sba_pdf_render_alt_modal();
+	$modal = (string) ob_get_clean();
 
 	return sprintf(
 		'<div class="sba-att-wrap" data-id="%d" data-nonce="%s" style="font-size:12px;">
@@ -50,7 +54,7 @@ function sba_pdf_attachment_field_html( int $id, array $meta, string $nonce ): s
 		esc_html( $status['label'] ),
 		esc_html( sba_pdf_attachment_status_hint( $meta, $status['level'] ) ),
 		$action
-	);
+	) . $modal;
 }
 
 function sba_pdf_attachment_status_hint( array $meta, string $level ): string {
@@ -61,7 +65,7 @@ function sba_pdf_attachment_status_hint( array $meta, string $level ): string {
 		return 'Systém pripravil popisy obrázkov. Opravte len to, čo nesedí.';
 	}
 	if ( $level === 'green' ) {
-		return 'PDF je pripravené.';
+		return 'Dokument bol pripravený pre povinnosti prístupnosti.';
 	}
 	return 'PDF ešte nebolo spracované.';
 }

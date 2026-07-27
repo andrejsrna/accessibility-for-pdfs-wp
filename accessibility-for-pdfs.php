@@ -91,8 +91,8 @@ add_action( 'admin_enqueue_scripts', function ( $hook ) {
 	// Media modal + media edit screen — inline script for the "Opraviť teraz" button.
 	wp_add_inline_script( 'jquery-core', sba_pdf_media_modal_js() );
 
-	// Dedicated plugin admin page.
-	if ( $hook === 'media_page_sba-pdf-accessibility' ) {
+	// Plugin page and attachment detail share the same review modal.
+	if ( $hook === 'media_page_sba-pdf-accessibility' || $hook === 'media.php' || $hook === 'upload.php' ) {
 		wp_enqueue_style(
 			'sba-pdf-a11y-admin',
 			SBA_PDF_A11Y_URL . 'assets/admin.css',
