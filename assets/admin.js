@@ -250,6 +250,19 @@
 				});
 		});
 
+		function refreshAttachmentPanel(id, meta) {
+			var wrap = $('.sba-att-wrap[data-id="' + id + '"]');
+			if (!wrap.length) return;
+			var st = computeStatus(meta);
+			var colors = { red: '#d63638', yellow: '#996800', green: '#008a20' };
+			wrap.find('> strong').css('color', colors[st.level] || '#646970').text(st.label);
+			var hint = meta.review_required
+				? 'Systém pripravil popisy obrázkov. Opravte len to, čo nesedí.'
+				: (st.level === 'green' ? 'Dokument bol pripravený pre povinnosti prístupnosti.' : 'PDF ešte nebolo spracované.');
+			wrap.find('> div').first().text(hint);
+			wrap.find('.sba-att-review-btn, .sba-att-process-btn').remove();
+		}
+
 		$(document).on('click', '#sba-alt-save', function () {
 			var alts = {};
 			var structXrefs = {};
@@ -277,7 +290,10 @@
 					// UI reflects what was actually written into its structure tree.
 					$.post(ajaxUrl, { action: 'sba_pdf_check', nonce: nonce, id: altCurrentId })
 						.done(function (check) {
-							if (check.success) { refreshCard(altCurrentId, check.data); }
+							if (check.success) {
+								refreshCard(altCurrentId, check.data);
+								refreshAttachmentPanel(altCurrentId, check.data);
+							}
 						});
 				} else {
 					showNotice('Alt texty sa nepodarilo uložiť.', 'error');
