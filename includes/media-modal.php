@@ -22,55 +22,48 @@ add_filter( 'attachment_fields_to_edit', function ( array $fields, WP_Post $post
 }, 10, 2 );
 
 /**
- * Render the media-modal attachment field HTML with badges + process button.
+ * Render a one-state attachment field. Editors get one next action only.
  */
 function sba_pdf_attachment_field_html( int $id, array $meta, string $nonce ): string {
-	$badges = sba_pdf_attachment_badges_html( $meta );
-	$last   = ! empty( $meta['checked_at'] )
-		? '<div style="font-size:10px;color:#888;margin-top:4px;">Posledná kontrola: ' . esc_html( $meta['checked_at'] ) . '</div>'
-		: '';
+	$status = sba_pdf_compute_status( $meta );
+	$colors = [ 'red' => '#d63638', 'yellow' => '#996800', 'green' => '#008a20' ];
+	$color  = $colors[ $status['level'] ] ?? '#646970';
+	$action = '';
+
+	if ( $status['level'] === 'red' ) {
+		$action = '<button type="button" class="button button-primary sba-att-process-btn" style="margin-top:8px;">Spracovať PDF</button>';
+	} elseif ( ! empty( $meta['review_required'] ) ) {
+		$url    = admin_url( 'upload.php?page=sba-pdf-accessibility#sba-row-' . $id );
+		$action = '<a class="button button-primary" style="margin-top:8px;" href="' . esc_attr( $url ) . '">Skontrolovať a potvrdiť</a>';
+	}
 
 	return sprintf(
 		'<div class="sba-att-wrap" data-id="%d" data-nonce="%s" style="font-size:12px;">
-			<div class="sba-att-badges">%s</div>
+			<strong style="color:%s;">%s</strong>
+			<div style="color:#646970;margin-top:4px;">%s</div>
 			%s
-			<button type="button" class="button button-small sba-att-process-btn" style="margin-top:8px;">
-				Opraviť teraz
-			</button>
 			<span class="sba-att-result" style="margin-left:8px;font-size:11px;"></span>
 		</div>',
 		$id,
 		esc_attr( $nonce ),
-		$badges,
-		$last
+		esc_attr( $color ),
+		esc_html( $status['label'] ),
+		esc_html( sba_pdf_attachment_status_hint( $meta, $status['level'] ) ),
+		$action
 	);
 }
 
-/**
- * Render the status badge table for the media modal.
- */
-function sba_pdf_attachment_badges_html( array $meta ): string {
-	if ( empty( $meta ) ) {
-		return '<span style="color:#888;">Ešte nebolo skontrolované</span>';
-	}
+function sba_pdf_attachment_status_hint( array $meta, string $level ): string {
 	if ( ( $meta['status'] ?? '' ) === 'pending' ) {
-		return '<span style="color:#055160;">⏳ Čaká na spracovanie na pozadí…</span>';
+		return 'PDF sa pripravuje na pozadí. Môžete pokračovať v práci.';
 	}
-	$rows = [
-		'Text/OCR'   => sba_pdf_badge( $meta, 'has_text' ),
-		'Záložky'    => sba_pdf_badge( $meta, 'bookmarks_count' ),
-		'Meta titul' => sba_pdf_badge( $meta, 'meta_title' ),
-		'Jazyk'      => sba_pdf_badge( $meta, 'meta_lang' ),
-		'Fonty'      => sba_pdf_badge( $meta, 'fonts_embedded' ),
-	];
-	$html = '<table style="border-collapse:collapse;width:100%;">';
-	foreach ( $rows as $label => $badge ) {
-		$html .= "<tr>
-			<td style='padding:2px 6px 2px 0;color:#555;white-space:nowrap;'>{$label}</td>
-			<td style='padding:2px 0;'>{$badge}</td>
-		</tr>";
+	if ( ! empty( $meta['review_required'] ) ) {
+		return 'Systém pripravil popisy obrázkov. Opravte len to, čo nesedí.';
 	}
-	return $html . '</table>';
+	if ( $level === 'green' ) {
+		return 'PDF je pripravené.';
+	}
+	return 'PDF ešte nebolo spracované.';
 }
 
 /**
