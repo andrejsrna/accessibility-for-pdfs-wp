@@ -488,10 +488,13 @@ function sba_pdf_compute_status( array $meta ): array {
 		];
 	}
 
-	if ( empty( $meta['tagged_pdf'] ) ) {
+	// images_without_alt reflects PDF-embedded /Alt tags only. For untagged
+	// PDFs those can never exist, so once the editor has confirmed alt texts
+	// (stored in WP postmeta) the document is done regardless of that count.
+	if ( ! empty( $meta['alts_confirmed_at'] ) ) {
 		return [
-			'level'  => 'yellow',
-			'label'  => 'Pripravujeme PDF',
+			'level'  => 'green',
+			'label'  => 'Pripravené',
 		];
 	}
 

@@ -8,7 +8,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'SBA_PDF_A11Y_VERSION', '1.1.1' );
+define( 'SBA_PDF_A11Y_VERSION', '1.1.3' );
 define( 'SBA_PDF_A11Y_DIR', plugin_dir_path( __FILE__ ) );
 define( 'SBA_PDF_A11Y_URL', plugin_dir_url( __FILE__ ) );
 define( 'SBA_PDF_A11Y_PYTHON_SCRIPT', SBA_PDF_A11Y_DIR . 'bin/process_pdf.py' );

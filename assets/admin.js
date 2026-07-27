@@ -26,7 +26,7 @@
 			if (meta.status === 'pending') return { level: 'red', label: 'Čaká na spracovanie…' };
 			if (!meta.has_text || !meta.fonts_embedded || !meta.meta_title || !meta.meta_lang) return { level: 'red', label: 'Vyžaduje spracovanie' };
 			if (meta.review_required) return { level: 'yellow', label: 'Skontrolujte obrázky' };
-			if (!meta.tagged_pdf) return { level: 'yellow', label: 'Pripravujeme PDF' };
+			if (meta.alts_confirmed_at) return { level: 'green', label: 'Pripravené' };
 			var miss = parseInt(meta.images_without_alt || 0, 10);
 			if (miss > 0) return { level: 'yellow', label: 'Chýbajú alt texty (' + miss + ')' };
 			return { level: 'green', label: 'Pripravené' };
