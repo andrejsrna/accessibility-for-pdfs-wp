@@ -56,15 +56,27 @@ def check_pdf(path: str) -> dict:
         result["meta_subject"] = meta.get("subject", "")
         result["meta_lang"] = doc.language or ""
 
-        # Count image instances, then inspect /Alt directly on /Figure elements.
+        # Count unique, non-decorative images (dedup by xref, skip micro
+        # images with no visual content), then inspect /Alt directly on
+        # /Figure elements. Must match extract_image_previews() logic so the
+        # editor-facing count and the AI review queue never disagree.
         # PyMuPDF's raw image dictionary does not reliably expose PDF structure
         # attributes, so it cannot be the source of truth for PDF alt text.
-        image_total = 0
+        seen_xrefs = set()
         for page in doc:
-            image_list = page.get_images(full=True)
-            for img_ref in image_list:
+            for img_ref in page.get_images(full=True):
+                xref = img_ref[0]
+                if xref in seen_xrefs:
+                    continue
+                try:
+                    pix_check = fitz.Pixmap(doc, xref)
+                    if pix_check.width * pix_check.height <= 64:
+                        continue
+                except Exception:
+                    pass
                 result["has_images"] = True
-                image_total += 1
+                seen_xrefs.add(xref)
+        image_total = len(seen_xrefs)
 
         if image_total:
             alt_count = 0

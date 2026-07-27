@@ -332,6 +332,9 @@ function sba_pdf_save_status_meta( int $id, array $status ): array {
 		'localtag_status',
 		'localtag_pdfinfo',
 		'localtag_validator',
+		'review_required',
+		'ai_alts_ready_at',
+		'alts_confirmed_at',
 	];
 	foreach ( $preserve_keys as $key ) {
 		if ( array_key_exists( $key, $existing ) && ! array_key_exists( $key, $status ) ) {
