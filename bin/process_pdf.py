@@ -595,6 +595,7 @@ def extract_image_previews(path: str, max_images: int = 30) -> dict:
     tagged = _has_struct_tree(doc)
     images = []
     count = 0
+    seen_xrefs = set()
     for page_num, page in enumerate(doc):
         if count >= max_images:
             break
@@ -602,6 +603,21 @@ def extract_image_previews(path: str, max_images: int = 30) -> dict:
             if count >= max_images:
                 break
             xref = img_ref[0]
+
+            # Skip decorative micro-images (1x2 borders, thin lines, 1px fills).
+            # These have no visual content for AI to describe.
+            try:
+                pix_check = fitz.Pixmap(doc, xref)
+                if pix_check.width * pix_check.height <= 64:
+                    continue
+            except Exception:
+                pass
+
+            # Dedup: one thumbnail + one AI call per unique xref.
+            if xref in seen_xrefs:
+                continue
+            seen_xrefs.add(xref)
+
             has_alt = _image_has_alt(doc, page, xref)
             thumb_b64 = make_thumb(page, xref)
             images.append({
