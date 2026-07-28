@@ -455,17 +455,17 @@ function sba_pdf_tagged_badge( array $meta ): string {
  * Compute a simplified traffic-light status from the stored metadata.
  */
 function sba_pdf_compute_status( array $meta ): array {
-	if ( empty( $meta ) || empty( $meta['checked_at'] ?? '' ) ) {
-		return [
-			'level'  => 'red',
-			'label'  => 'Vyžaduje spracovanie',
-		];
-	}
-
 	if ( ( $meta['status'] ?? '' ) === 'pending' ) {
 		return [
 			'level'  => 'red',
 			'label'  => 'Čaká na spracovanie…',
+		];
+	}
+
+	if ( empty( $meta ) || empty( $meta['checked_at'] ?? '' ) ) {
+		return [
+			'level'  => 'red',
+			'label'  => 'Vyžaduje spracovanie',
 		];
 	}
 

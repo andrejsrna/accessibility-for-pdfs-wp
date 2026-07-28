@@ -30,7 +30,7 @@ function sba_pdf_attachment_field_html( int $id, array $meta, string $nonce ): s
 	$color  = $colors[ $status['level'] ] ?? '#646970';
 	$action = '';
 
-	if ( $status['level'] === 'red' ) {
+	if ( $status['level'] === 'red' && ( $meta['status'] ?? '' ) !== 'pending' ) {
 		$action = '<button type="button" class="button button-primary sba-att-process-btn" style="margin-top:8px;">Spracovať PDF</button>';
 	} elseif ( ! empty( $meta['review_required'] ) ) {
 		$image_count = (int) ( ( $meta['images_with_alt'] ?? 0 ) + ( $meta['images_without_alt'] ?? 0 ) );
@@ -71,7 +71,9 @@ function sba_pdf_attachment_status_hint( array $meta, string $level ): string {
 }
 
 /**
- * Inline JS injected into the media modal for the "Opraviť teraz" button.
+ * Inline JS injected into the media modal for the "Spracovať PDF" button.
+ * Queues the same automatic pipeline (process + AI suggestions) used on
+ * upload — no separate synchronous "repair" path, no technical field table.
  */
 function sba_pdf_media_modal_js(): string {
 	return <<<'JS'
@@ -80,34 +82,26 @@ function sba_pdf_media_modal_js(): string {
 		var $wrap = $(this).closest('.sba-att-wrap');
 		var id    = $wrap.data('id');
 		var nonce = $wrap.data('nonce');
-		var $btn  = $(this).prop('disabled', true).text('…');
-		var $res  = $wrap.find('.sba-att-result').text('Spracováva sa…');
+		var $btn  = $(this).prop('disabled', true).text('Zaraďujem…');
+		var $res  = $wrap.find('.sba-att-result').text('');
 
 		$.post(window.ajaxurl || '/wp-admin/admin-ajax.php', {
-			action: 'sba_pdf_process',
+			action: 'sba_pdf_queue_single',
 			nonce:  nonce,
 			id:     id
 		}).done(function(r){
-			if(r.success && r.data && r.data.status){
-				var s = r.data.status;
-				function b(v){ return v ? '✓' : '✗'; }
-				var rows =
-					'<table style="border-collapse:collapse;width:100%;font-size:12px;">' +
-					'<tr><td style="padding:2px 6px 2px 0;color:#555;">Text/OCR</td><td>' + b(s.has_text) + '</td></tr>' +
-					'<tr><td style="padding:2px 6px 2px 0;color:#555;">Záložky</td><td>' + (s.bookmarks_count||0) + '</td></tr>' +
-					'<tr><td style="padding:2px 6px 2px 0;color:#555;">Meta titul</td><td>' + (s.meta_title||'—') + '</td></tr>' +
-					'<tr><td style="padding:2px 6px 2px 0;color:#555;">Jazyk</td><td>' + (s.meta_lang||'—') + '</td></tr>' +
-					'<tr><td style="padding:2px 6px 2px 0;color:#555;">Fonty</td><td>' + b(s.fonts_embedded) + '</td></tr>' +
-					'</table>';
-				$wrap.find('.sba-att-badges').html(rows);
-				$res.text('✓ Hotovo');
+			if(r.success){
+				$wrap.find('> strong').css('color', '#d63638').text('Čaká na spracovanie…');
+				$wrap.find('> div').first().text('PDF sa pripravuje na pozadí. Môžete pokračovať v práci.');
+				$btn.remove();
+				$res.text('');
 			} else {
-				$res.text('✗ Chyba');
+				$res.text('Nepodarilo sa zaradiť na spracovanie.');
+				$btn.prop('disabled', false).text('Spracovať PDF');
 			}
 		}).fail(function(){
-			$res.text('✗ Požiadavka zlyhala');
-		}).always(function(){
-			$btn.prop('disabled', false).text('Opraviť teraz');
+			$res.text('Požiadavka zlyhala.');
+			$btn.prop('disabled', false).text('Spracovať PDF');
 		});
 	});
 })(jQuery);
