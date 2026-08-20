@@ -157,6 +157,50 @@ function sba_pdf_require_editable_attachment( int $id ): void {
 define( 'SBA_PDF_A11Y_OPENAI_API_URL', 'https://api.openai.com/v1/chat/completions' );
 define( 'SBA_PDF_A11Y_OPENAI_MAX_PER_REQUEST', 8 );
 
+// Codex bridge: a unix-socket HTTP server on the host (see
+// scripts/sba-codex-bridge.py + scripts/sba-codex-bridge.service) that the
+// WordPress container reaches via the shared bind-mount. When enabled, alt
+// texts go through the Codex/ChatGPT subscription (no per-token API cost)
+// instead of the direct OpenAI Vision API. Empty => bridge disabled.
+define( 'SBA_PDF_A11Y_CODEX_SOCKET', '/var/www/html/.sba-codex/bridge.sock' );
+
+function sba_pdf_use_codex(): bool {
+	if ( ! defined( 'SBA_PDF_A11Y_USE_CODEX' ) || ! SBA_PDF_A11Y_USE_CODEX ) {
+		return false;
+	}
+	return SBA_PDF_A11Y_CODEX_SOCKET !== '' && file_exists( SBA_PDF_A11Y_CODEX_SOCKET );
+}
+
+/**
+ * Ask the host Codex bridge to describe one image. Returns ['alt' => ...] on
+ * success or ['error' => ...] on failure so callers can fall back to the API.
+ */
+function sba_pdf_codex_suggest_alt( string $thumb_b64, string $doc_title, int $page ): array {
+	$payload = wp_json_encode( [
+		'images' => [
+			[ 'b64' => $thumb_b64, 'title' => $doc_title, 'page' => $page ],
+		],
+	] );
+
+	// WordPress' wp_remote_post can't target a unix socket, so shell out to
+	// curl --unix-socket, which is present in the container.
+	$cmd = sprintf(
+		'curl --unix-socket %s -s -m 120 http://localhost/suggest -H "Content-Type: application/json" -d %s',
+		escapeshellarg( SBA_PDF_A11Y_CODEX_SOCKET ),
+		escapeshellarg( $payload )
+	);
+	$out = @shell_exec( $cmd );
+	if ( ! is_string( $out ) || $out === '' ) {
+		return [ 'error' => 'Codex bridge neodpovedal.' ];
+	}
+	$json = json_decode( $out, true );
+	if ( ! is_array( $json ) || ! isset( $json['alts'][0] ) ) {
+		return [ 'error' => 'Codex bridge vrátil neočakávanú odpoveď.' ];
+	}
+	$alt = (string) ( $json['alts'][0]['alt'] ?? '' );
+	return [ 'alt' => trim( $alt ) ];
+}
+
 function sba_pdf_openai_api_key(): string {
 	if ( defined( 'SBA_ALT_OPENAI_API_KEY' ) && SBA_ALT_OPENAI_API_KEY ) {
 		return trim( (string) SBA_ALT_OPENAI_API_KEY );
@@ -179,12 +223,23 @@ function sba_pdf_openai_model(): string {
  * not a failure, and the UI must not treat it as an error.
  */
 function sba_pdf_suggest_alt_text( string $thumb_b64, string $doc_title, int $page ): array {
+	if ( $thumb_b64 === '' ) {
+		return [ 'error' => 'Náhľad obrázka nie je dostupný.' ];
+	}
+
+	// Prefer the Codex bridge (subscription) when enabled and reachable;
+	// fall back to the direct OpenAI Vision API otherwise.
+	if ( sba_pdf_use_codex() ) {
+		$codex = sba_pdf_codex_suggest_alt( $thumb_b64, $doc_title, $page );
+		if ( ! isset( $codex['error'] ) ) {
+			return $codex;
+		}
+		// fall through to API on bridge failure
+	}
+
 	$api_key = sba_pdf_openai_api_key();
 	if ( ! $api_key ) {
 		return [ 'error' => 'Chýba OPENAI_API_KEY na serveri.' ];
-	}
-	if ( $thumb_b64 === '' ) {
-		return [ 'error' => 'Náhľad obrázka nie je dostupný.' ];
 	}
 
 	$instructions = implode( "\n", array_filter( [

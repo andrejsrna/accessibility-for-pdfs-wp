@@ -21,6 +21,11 @@ define( 'SBA_PDF_A11Y_ALT_META_KEY', '_sba_pdf_image_alts' );
 // embedding them into the PDF structure still happens only on a manual save.
 define( 'SBA_PDF_A11Y_AUTO_CONFIRM_ALTS', true );
 
+// Route AI alt-text suggestions through the host Codex bridge (ChatGPT
+// subscription, no per-token API cost) instead of the direct OpenAI Vision
+// API. Falls back to the API automatically if the bridge is unavailable.
+define( 'SBA_PDF_A11Y_USE_CODEX', true );
+
 // Core includes. Keep helpers first: other modules depend on them.
 require_once SBA_PDF_A11Y_DIR . 'includes/class-helpers.php';
 require_once SBA_PDF_A11Y_DIR . 'includes/class-ajax.php';
