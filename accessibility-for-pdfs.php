@@ -8,12 +8,18 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'SBA_PDF_A11Y_VERSION', '1.1.4' );
+define( 'SBA_PDF_A11Y_VERSION', '1.3.0' );
 define( 'SBA_PDF_A11Y_DIR', plugin_dir_path( __FILE__ ) );
 define( 'SBA_PDF_A11Y_URL', plugin_dir_url( __FILE__ ) );
 define( 'SBA_PDF_A11Y_PYTHON_SCRIPT', SBA_PDF_A11Y_DIR . 'bin/process_pdf.py' );
 define( 'SBA_PDF_A11Y_META_KEY', '_sba_pdf_a11y' );
 define( 'SBA_PDF_A11Y_ALT_META_KEY', '_sba_pdf_image_alts' );
+
+// Auto-confirm AI alt-text suggestions so a freshly uploaded PDF flows all
+// the way to "Pripravené" without an editor clicking "Potvrdiť". Set to
+// false to restore the manual review step. Alt texts stay in WP postmeta;
+// embedding them into the PDF structure still happens only on a manual save.
+define( 'SBA_PDF_A11Y_AUTO_CONFIRM_ALTS', true );
 
 // Core includes. Keep helpers first: other modules depend on them.
 require_once SBA_PDF_A11Y_DIR . 'includes/class-helpers.php';

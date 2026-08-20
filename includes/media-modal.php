@@ -71,9 +71,10 @@ function sba_pdf_attachment_status_hint( array $meta, string $level ): string {
 }
 
 /**
- * Inline JS injected into the media modal for the "Spracovať PDF" button.
- * Queues the same automatic pipeline (process + AI suggestions) used on
- * upload — no separate synchronous "repair" path, no technical field table.
+ * Inline JS injected into the media modal for the "Spracovať PDF" button,
+ * plus a lightweight poller so the attachment-detail panel updates itself
+ * once background processing finishes — no manual refresh, no need to open
+ * the PDF Prístupnosť dashboard.
  */
 function sba_pdf_media_modal_js(): string {
 	return <<<'JS'
@@ -95,6 +96,7 @@ function sba_pdf_media_modal_js(): string {
 				$wrap.find('> div').first().text('PDF sa pripravuje na pozadí. Môžete pokračovať v práci.');
 				$btn.remove();
 				$res.text('');
+				startAttachmentPoll($wrap);
 			} else {
 				$res.text('Nepodarilo sa zaradiť na spracovanie.');
 				$btn.prop('disabled', false).text('Spracovať PDF');
@@ -102,6 +104,121 @@ function sba_pdf_media_modal_js(): string {
 		}).fail(function(){
 			$res.text('Požiadavka zlyhala.');
 			$btn.prop('disabled', false).text('Spracovať PDF');
+		});
+	});
+
+	// Poll while a PDF is mid-pipeline (pending, or checked but still
+	// missing the AI pass) so the panel updates itself without a page
+	// reload or a trip to the PDF Prístupnosť dashboard.
+	var pollTimers = {};
+
+	function isMidPipeline($wrap) {
+		var label = $.trim($wrap.find('> strong').text());
+		return label === 'Čaká na spracovanie…' || label === 'Vyžaduje spracovanie';
+	}
+
+	// Once basic processing lands (checked_at set) the background AI pass may
+	// still be running in batches (large PDFs). Keep polling until either the
+	// AI pass finished (ai_alts_ready_at) or the doc needed no AI pass at all
+	// (no missing alt texts) — otherwise the panel would flip to "Chýbajú alt
+	// texty" mid-batch and the poller would stop before suggestions land.
+	function isWaitingOnAiPass(meta) {
+		if (!meta || !meta.checked_at) return false;
+		if (meta.ai_alts_ready_at || meta.review_required || meta.alts_confirmed_at) return false;
+		return parseInt(meta.images_without_alt || 0, 10) > 0;
+	}
+
+	function computeAttachmentStatus(meta) {
+		if (meta && meta.status === 'pending') return { level: 'red', label: 'Čaká na spracovanie…' };
+		if (!meta || !meta.checked_at) return { level: 'red', label: 'Vyžaduje spracovanie' };
+		if (!meta.has_text || !meta.fonts_embedded || !meta.meta_title || !meta.meta_lang) return { level: 'red', label: 'Vyžaduje spracovanie' };
+		if (meta.review_required) return { level: 'yellow', label: 'Skontrolujte obrázky' };
+		if (meta.alts_confirmed_at) return { level: 'green', label: 'Pripravené' };
+		var miss = parseInt(meta.images_without_alt || 0, 10);
+		if (miss > 0) return { level: 'yellow', label: 'Chýbajú alt texty (' + miss + ')' };
+		return { level: 'green', label: 'Pripravené' };
+	}
+
+	function renderPollState($wrap, meta) {
+		var colors = { red: '#d63638', yellow: '#996800', green: '#008a20' };
+		var st = computeAttachmentStatus(meta);
+		$wrap.find('> strong').css('color', colors[st.level] || '#646970').text(st.label);
+
+		var hint = 'PDF sa pripravuje na pozadí. Môžete pokračovať v práci.';
+		if (meta.review_required) {
+			hint = 'Systém pripravil popisy obrázkov. Opravte len to, čo nesedí.';
+		} else if (st.level === 'green') {
+			hint = 'Dokument bol pripravený pre povinnosti prístupnosti.';
+		} else if (st.level !== 'red') {
+			hint = 'PDF ešte nebolo spracované.';
+		}
+		$wrap.find('> div').first().text(hint);
+
+		$wrap.find('.sba-att-review-btn, .sba-att-process-btn').remove();
+		if (meta.review_required) {
+			var imageCount = (parseInt(meta.images_with_alt || 0, 10) + parseInt(meta.images_without_alt || 0, 10));
+			$wrap.find('.sba-att-result').before(
+				'<button type="button" class="button button-primary sba-alts-btn sba-att-review-btn" data-id="' + $wrap.data('id') + '" data-images="' + imageCount + '" style="margin-top:8px;">Skontrolovať a potvrdiť</button>'
+			);
+		}
+		return st;
+	}
+
+	function shouldKeepPolling($wrap) {
+		if (isMidPipeline($wrap)) return true;
+		return !!$wrap.data('sba-waiting-ai');
+	}
+
+	function pollOnce($wrap) {
+		var id    = $wrap.data('id');
+		var nonce = $wrap.data('nonce');
+
+		$.post(window.ajaxurl || '/wp-admin/admin-ajax.php', {
+			action: 'sba_pdf_check',
+			nonce:  nonce,
+			id:     id
+		}).done(function(r){
+			if (!r.success || !r.data) return;
+			var st = renderPollState($wrap, r.data);
+			var waitingOnAi = isWaitingOnAiPass(r.data);
+			$wrap.data('sba-waiting-ai', waitingOnAi);
+			if (st.level !== 'red' && !waitingOnAi) {
+				stopAttachmentPoll(id);
+			}
+		});
+	}
+
+	// Cap polling so an abandoned tab (or a doc that never finishes, e.g.
+	// missing OpenAI key) doesn't hammer admin-ajax.php forever.
+	var MAX_POLL_ATTEMPTS = 90; // ~12 minutes at 8s intervals
+
+	function startAttachmentPoll($wrap) {
+		var id = $wrap.data('id');
+		if (pollTimers[id]) return;
+		var attempts = 0;
+		pollTimers[id] = setInterval(function () {
+			attempts++;
+			if (attempts > MAX_POLL_ATTEMPTS || !shouldKeepPolling($wrap)) {
+				stopAttachmentPoll(id);
+				return;
+			}
+			pollOnce($wrap);
+		}, 8000);
+	}
+
+	function stopAttachmentPoll(id) {
+		if (pollTimers[id]) {
+			clearInterval(pollTimers[id]);
+			delete pollTimers[id];
+		}
+	}
+
+	$(function(){
+		$('.sba-att-wrap').each(function () {
+			var $wrap = $(this);
+			if (isMidPipeline($wrap)) {
+				startAttachmentPoll($wrap);
+			}
 		});
 	});
 })(jQuery);

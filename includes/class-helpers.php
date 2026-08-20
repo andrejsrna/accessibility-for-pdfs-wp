@@ -302,8 +302,20 @@ function sba_pdf_auto_suggest_alts( int $id ): void {
 		}
 	}
 	$meta = sba_pdf_get_meta( $id );
-	$meta['review_required'] = $review;
 	$meta['ai_alts_ready_at'] = current_time( 'mysql' );
+
+	// Auto-confirm: once the AI pass completes, accept the suggestions and
+	// mark the document ready with no editor click. Alt texts live in WP
+	// postmeta (embedding into the PDF structure still happens only on a
+	// manual save, which is the one thing that rewrites the file).
+	if ( SBA_PDF_A11Y_AUTO_CONFIRM_ALTS ) {
+		$meta['review_required']  = false;
+		$meta['alts_confirmed_at'] = current_time( 'mysql' );
+		$meta['alt_embed_status'] = 'wp_only';
+	} else {
+		$meta['review_required'] = $review;
+	}
+
 	sba_pdf_save_meta( $id, $meta );
 }
 
