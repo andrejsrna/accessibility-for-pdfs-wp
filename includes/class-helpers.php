@@ -162,7 +162,21 @@ define( 'SBA_PDF_A11Y_OPENAI_MAX_PER_REQUEST', 8 );
 // WordPress container reaches via the shared bind-mount. When enabled, alt
 // texts go through the Codex/ChatGPT subscription (no per-token API cost)
 // instead of the direct OpenAI Vision API. Empty => bridge disabled.
-define( 'SBA_PDF_A11Y_CODEX_SOCKET', '/var/www/html/.sba-codex/bridge.sock' );
+if ( ! defined( 'SBA_PDF_A11Y_CODEX_SOCKET' ) ) {
+	define( 'SBA_PDF_A11Y_CODEX_SOCKET', '/var/www/html/.sba-codex/bridge.sock' );
+}
+
+/** Provider policy is applied to both manual and automatic calls. A present
+ * API key is not consent. Opt-out always wins, including over filters. */
+function sba_pdf_ai_provider( int $id = 0 ): string {
+	if ( $id && get_post_meta( $id, '_sba_pdf_ai_opt_out', true ) ) {
+		return 'none';
+	}
+	$default = defined( 'SBA_PDF_A11Y_USE_CODEX' ) && SBA_PDF_A11Y_USE_CODEX ? 'codex' : 'none';
+	$provider = defined( 'SBA_PDF_A11Y_AI_PROVIDER' ) ? SBA_PDF_A11Y_AI_PROVIDER : $default;
+	$provider = (string) apply_filters( 'sba_pdf_ai_provider', $provider, $id );
+	return in_array( $provider, [ 'none', 'codex', 'openai' ], true ) ? $provider : 'none';
+}
 
 function sba_pdf_use_codex(): bool {
 	if ( ! defined( 'SBA_PDF_A11Y_USE_CODEX' ) || ! SBA_PDF_A11Y_USE_CODEX ) {
@@ -222,19 +236,26 @@ function sba_pdf_openai_model(): string {
  * model judged the image purely decorative — that is a valid suggestion,
  * not a failure, and the UI must not treat it as an error.
  */
-function sba_pdf_suggest_alt_text( string $thumb_b64, string $doc_title, int $page ): array {
+function sba_pdf_suggest_alt_text( string $thumb_b64, string $doc_title, int $page, int $id = 0 ): array {
 	if ( $thumb_b64 === '' ) {
 		return [ 'error' => 'Náhľad obrázka nie je dostupný.' ];
 	}
 
-	// Prefer the Codex bridge (subscription) when enabled and reachable;
-	// fall back to the direct OpenAI Vision API otherwise.
-	if ( sba_pdf_use_codex() ) {
-		$codex = sba_pdf_codex_suggest_alt( $thumb_b64, $doc_title, $page );
+	$provider = sba_pdf_ai_provider( $id );
+	if ( $provider === 'none' ) {
+		return [ 'error' => 'AI návrhy sú pre tento dokument vypnuté.' ];
+	}
+	if ( $provider === 'codex' ) {
+		$codex = SBA_PDF_A11Y_CODEX_SOCKET !== '' && file_exists( SBA_PDF_A11Y_CODEX_SOCKET )
+			? sba_pdf_codex_suggest_alt( $thumb_b64, $doc_title, $page )
+			: [ 'error' => 'Codex bridge nie je dostupný.' ];
 		if ( ! isset( $codex['error'] ) ) {
 			return $codex;
 		}
-		// fall through to API on bridge failure
+		$fallback = defined( 'SBA_PDF_A11Y_ALLOW_OPENAI_FALLBACK' ) && SBA_PDF_A11Y_ALLOW_OPENAI_FALLBACK;
+		if ( ! apply_filters( 'sba_pdf_allow_openai_fallback', $fallback, $id ) ) {
+			return $codex;
+		}
 	}
 
 	$api_key = sba_pdf_openai_api_key();
@@ -289,7 +310,7 @@ function sba_pdf_suggest_alt_text( string $thumb_b64, string $doc_title, int $pa
 		return [ 'error' => sba_pdf_safe_error_detail( (string) $msg ) ];
 	}
 
-	$content = $body['choices'][0]['message']['content'] ?? '';
+	$content = $body['choices'][0]['message']['content'] ?? null;
 	if ( ! is_string( $content ) ) {
 		return [ 'error' => 'OpenAI odpoveď nemá očakávaný obsah.' ];
 	}
@@ -302,75 +323,66 @@ function sba_pdf_suggest_alt_text( string $thumb_b64, string $doc_title, int $pa
 	return [ 'alt' => $alt, 'decorative' => $alt === '' ];
 }
 
-/**
- * Background AI pass after upload. Stores suggestions only; no PDF or public
- * attachment data changes until an editor confirms them in the review modal.
- */
+/** Background batches retain successful suggestions. Failures are terminal,
+ * visible review states (no infinite cron retries or false completion). */
 function sba_pdf_auto_suggest_alts( int $id ): void {
-	if ( ! sba_pdf_openai_api_key() ) {
+	$meta = sba_pdf_get_meta( $id );
+	$meta['ai_alt_status'] = 'failed';
+	$meta['review_required'] = true;
+	unset( $meta['ai_alts_ready_at'], $meta['alts_confirmed_at'] );
+	if ( sba_pdf_ai_provider( $id ) === 'none' ) {
+		$meta['ai_alt_status'] = 'disabled';
+		$meta['ai_alt_error'] = 'AI návrhy sú vypnuté; skontrolujte alt texty manuálne.';
+		sba_pdf_save_meta( $id, $meta );
 		return;
 	}
-
 	$path = get_attached_file( $id );
-	if ( ! $path || ! file_exists( $path ) ) {
+	$images_result = $path && file_exists( $path ) ? sba_pdf_run( 'images', $path ) : null;
+	if ( ! is_array( $images_result ) || isset( $images_result['error'] ) || ! isset( $images_result['images'] ) || ! is_array( $images_result['images'] ) ) {
+		$meta['ai_alt_error'] = 'Nepodarilo sa načítať obrázky; vyžaduje manuálnu kontrolu.';
+		sba_pdf_save_meta( $id, $meta );
 		return;
 	}
-	$images_result = sba_pdf_run( 'images', $path );
-	$images        = is_array( $images_result ) ? ( $images_result['images'] ?? [] ) : [];
-	if ( ! $images ) {
-		return;
-	}
-
-	$stored    = (array) get_post_meta( $id, SBA_PDF_A11Y_ALT_META_KEY, true );
-	$next      = (int) get_post_meta( $id, '_sba_pdf_ai_alt_next', true );
-	$pending   = array_values( array_filter( array_keys( $images ), static function ( int $index ) use ( $stored ): bool {
+	$images = $images_result['images'];
+	$stored = (array) ( get_post_meta( $id, SBA_PDF_A11Y_ALT_META_KEY, true ) ?: [] );
+	$pending = array_values( array_filter( array_keys( $images ), static function ( $index ) use ( $stored ): bool {
 		return ! array_key_exists( $index, $stored );
 	} ) );
-	$batch     = array_slice( $pending, 0, SBA_PDF_A11Y_OPENAI_MAX_PER_REQUEST );
-	$title     = (string) get_the_title( $id );
-	$review    = false;
-
+	$batch = array_slice( $pending, 0, SBA_PDF_A11Y_OPENAI_MAX_PER_REQUEST );
+	$errors = [];
 	foreach ( $batch as $index ) {
-		if ( array_key_exists( $index, $stored ) ) {
-			continue;
-		}
 		$image = $images[ $index ];
-		$ai    = sba_pdf_suggest_alt_text( (string) ( $image['thumb'] ?? '' ), $title, (int) ( $image['page'] ?? 0 ) );
-		if ( isset( $ai['alt'] ) ) {
+		$ai = sba_pdf_suggest_alt_text( (string) ( $image['thumb'] ?? '' ), (string) get_the_title( $id ), (int) ( $image['page'] ?? 0 ), $id );
+		if ( isset( $ai['alt'] ) && is_string( $ai['alt'] ) && ! isset( $ai['error'] ) ) {
 			$stored[ $index ] = $ai['alt'];
-			$review = $review || $ai['alt'] !== '';
+		} else {
+			$errors[] = $ai['error'] ?? 'AI návrh zlyhal.';
 		}
 	}
-
 	update_post_meta( $id, SBA_PDF_A11Y_ALT_META_KEY, $stored );
-	if ( count( $pending ) > count( $batch ) ) {
-		update_post_meta( $id, '_sba_pdf_ai_alt_next', $next + count( $batch ) );
-		wp_schedule_single_event( time() + 5, 'sba_pdf_auto_suggest_async', [ $id ] );
+	delete_post_meta( $id, '_sba_pdf_ai_alt_next' );
+	if ( $errors ) {
+		$meta['ai_alt_error'] = sba_pdf_safe_error_detail( implode( ' ', $errors ) );
+		sba_pdf_save_meta( $id, $meta );
 		return;
 	}
-	delete_post_meta( $id, '_sba_pdf_ai_alt_next' );
-
-	foreach ( $stored as $alt ) {
-		if ( trim( (string) $alt ) !== '' ) {
-			$review = true;
-			break;
+	unset( $meta['ai_alt_error'] );
+	if ( count( $pending ) > count( $batch ) ) {
+		$meta['ai_alt_status'] = 'pending';
+		sba_pdf_save_meta( $id, $meta );
+		if ( ! wp_next_scheduled( 'sba_pdf_auto_suggest_async', [ $id ] ) ) {
+			wp_schedule_single_event( time() + 5, 'sba_pdf_auto_suggest_async', [ $id ] );
 		}
+		return;
 	}
-	$meta = sba_pdf_get_meta( $id );
+	$meta['ai_alt_status'] = $images ? 'complete' : 'not_needed';
 	$meta['ai_alts_ready_at'] = current_time( 'mysql' );
-
-	// Auto-confirm: once the AI pass completes, accept the suggestions and
-	// mark the document ready with no editor click. Alt texts live in WP
-	// postmeta (embedding into the PDF structure still happens only on a
-	// manual save, which is the one thing that rewrites the file).
-	if ( SBA_PDF_A11Y_AUTO_CONFIRM_ALTS ) {
-		$meta['review_required']  = false;
+	$meta['review_required'] = $images && ! SBA_PDF_A11Y_AUTO_CONFIRM_ALTS;
+	if ( $images && SBA_PDF_A11Y_AUTO_CONFIRM_ALTS ) {
 		$meta['alts_confirmed_at'] = current_time( 'mysql' );
+		// Suggestions were accepted in WP, not embedded or verified in PDF.
 		$meta['alt_embed_status'] = 'wp_only';
-	} else {
-		$meta['review_required'] = $review;
 	}
-
 	sba_pdf_save_meta( $id, $meta );
 }
 
@@ -401,6 +413,8 @@ function sba_pdf_save_status_meta( int $id, array $status ): array {
 		'localtag_validator',
 		'review_required',
 		'ai_alts_ready_at',
+		'ai_alt_status',
+		'ai_alt_error',
 		'alts_confirmed_at',
 	];
 	foreach ( $preserve_keys as $key ) {
@@ -430,7 +444,7 @@ function sba_pdf_safe_error_detail( string $error ): string {
 	$error = preg_replace( '/(client[_-]?secret|access[_-]?token|authorization)\s*[:=]\s*\S+/i', '$1=[redacted]', $error );
 	$error = preg_replace( '/\s+/', ' ', $error );
 
-	return mb_substr( $error, 0, 220 );
+	return function_exists( 'mb_substr' ) ? mb_substr( $error, 0, 220 ) : substr( $error, 0, 220 );
 }
 
 // ─── Badges (used by media modal + legacy table views) ────────────────────
@@ -555,17 +569,17 @@ function sba_pdf_compute_status( array $meta ): array {
 		];
 	}
 
-	// images_without_alt reflects PDF-embedded /Alt tags only. For untagged
-	// PDFs those can never exist, so once the editor has confirmed alt texts
-	// (stored in WP postmeta) the document is done regardless of that count.
-	if ( ! empty( $meta['alts_confirmed_at'] ) ) {
-		return [
-			'level'  => 'green',
-			'label'  => 'Pripravené',
-		];
+	// Acceptance of suggestions in WP is not evidence of accessible PDF bytes.
+	if ( ! empty( $meta['ai_alt_status'] ) && ! in_array( $meta['ai_alt_status'], [ 'complete', 'not_needed', 'reviewed' ], true ) ) {
+		return [ 'level' => 'yellow', 'label' => 'Spracované – vyžaduje kontrolu AI návrhov' ];
 	}
-
-	$images_without_alt = (int) ( $meta['images_without_alt'] ?? 0 );
+	if ( empty( $meta['tagged_pdf'] ) || in_array( $meta['alt_embed_status'] ?? '', [ 'wp_only', 'untagged' ], true ) ) {
+		return [ 'level' => 'yellow', 'label' => 'Spracované – vyžaduje kontrolu PDF' ];
+	}
+	if ( ! isset( $meta['images_without_alt'] ) || ! is_numeric( $meta['images_without_alt'] ) || (int) $meta['images_without_alt'] < 0 ) {
+		return [ 'level' => 'yellow', 'label' => 'Spracované – vyžaduje kontrolu alt textov' ];
+	}
+	$images_without_alt = (int) $meta['images_without_alt'];
 
 	if ( $images_without_alt > 0 ) {
 		return [
@@ -576,7 +590,7 @@ function sba_pdf_compute_status( array $meta ): array {
 
 	return [
 		'level'  => 'green',
-		'label'  => 'Pripravené',
+		'label'  => 'Spracované',
 	];
 }
 

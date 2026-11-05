@@ -17,19 +17,22 @@
 		function showNotice(msg, type) {
 			$('#sba-notice').removeClass('notice-success notice-error notice-warning')
 				.addClass('notice-' + (type || 'success'))
-				.html(msg)
+				.text(msg)
 				.show();
 		}
 
 		function computeStatus(meta) {
 			if (meta && meta.status === 'pending') return { level: 'red', label: 'Čaká na spracovanie…' };
 			if (!meta || !meta.checked_at) return { level: 'red', label: 'Vyžaduje spracovanie' };
-			if (!meta.has_text || !meta.fonts_embedded || !meta.meta_title || !meta.meta_lang) return { level: 'red', label: 'Vyžaduje spracovanie' };
+			if (!meta.has_text || !meta.fonts_embedded || !String(meta.meta_title || '').trim() || !String(meta.meta_lang || '').trim()) return { level: 'red', label: 'Vyžaduje spracovanie' };
 			if (meta.review_required) return { level: 'yellow', label: 'Skontrolujte obrázky' };
-			if (meta.alts_confirmed_at) return { level: 'green', label: 'Pripravené' };
-			var miss = parseInt(meta.images_without_alt || 0, 10);
+			if (meta.ai_alt_status && ['complete', 'not_needed', 'reviewed'].indexOf(meta.ai_alt_status) === -1) return { level: 'yellow', label: 'Spracované – vyžaduje kontrolu AI návrhov' };
+			if (!meta.tagged_pdf || ['wp_only', 'untagged'].indexOf(meta.alt_embed_status) !== -1) return { level: 'yellow', label: 'Spracované – vyžaduje kontrolu PDF' };
+			var count = meta.images_without_alt;
+			if (count === null || count === undefined || typeof count === 'boolean' || String(count).trim() === '' || !Number.isFinite(Number(count)) || Number(count) < 0) return { level: 'yellow', label: 'Spracované – vyžaduje kontrolu alt textov' };
+			var miss = Math.trunc(Number(count));
 			if (miss > 0) return { level: 'yellow', label: 'Chýbajú alt texty (' + miss + ')' };
-			return { level: 'green', label: 'Pripravené' };
+			return { level: 'green', label: 'Spracované' };
 		}
 
 		function refreshCard(id, meta) {
@@ -133,24 +136,30 @@
 
 		// ─── Alt text modal ───────────────────────────────────────────────
 		var altCurrentId = null;
+		var altGeneration = 0;
+		var altLoading = false;
+		var altSaving = false;
+		var altSuggesting = false;
+
+		function isCurrentAlt(id, generation) {
+			return altCurrentId === id && altGeneration === generation;
+		}
 
 		function renderAltFields(images, suggestedAlts) {
-			var fields = '';
+			var fields = $('#sba-alt-fields').empty();
 			images.forEach(function (img, n) {
+				var field = $('<div style="margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid #f0f0f0;"></div>');
 				var thumb = img.thumb
-					? '<img src="data:image/jpeg;base64,' + img.thumb + '" alt="" style="max-width:240px;max-height:160px;display:block;margin-bottom:6px;border:1px solid #ddd;border-radius:4px;">'
-					: '<div style="width:240px;max-width:100%;height:80px;display:flex;align-items:center;justify-content:center;margin-bottom:6px;border:1px dashed #c3c4c7;border-radius:4px;background:#f6f7f7;color:#646970;font-size:12px;text-align:center;padding:8px;box-sizing:border-box;">Náhľad nedostupný</div>';
-				var label = 'Strana ' + img.page + ', obrázok ' + img.index;
-				if (img.has_alt) { label += ' <span style="color:#0a3622;font-size:11px;">✓</span>'; }
-				var xrefAttr = img.struct_fig_xref ? ' data-struct-xref="' + parseInt(img.struct_fig_xref, 10) + '"' : '';
+					? $('<img alt="" style="max-width:240px;max-height:160px;display:block;margin-bottom:6px;border:1px solid #ddd;border-radius:4px;">').attr('src', 'data:image/jpeg;base64,' + img.thumb)
+					: $('<div style="width:240px;max-width:100%;height:80px;display:flex;align-items:center;justify-content:center;margin-bottom:6px;border:1px dashed #c3c4c7;border-radius:4px;background:#f6f7f7;color:#646970;font-size:12px;text-align:center;padding:8px;box-sizing:border-box;">Náhľad nedostupný</div>');
+				var label = $('<label style="display:block;font-weight:600;margin-bottom:4px;"></label>').text('Strana ' + img.page + ', obrázok ' + img.index);
+				if (img.has_alt) { label.append(' <span style="color:#0a3622;font-size:11px;">✓</span>'); }
 				var suggested = suggestedAlts && suggestedAlts[n] !== undefined ? suggestedAlts[n] : '';
-				fields += '<div style="margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid #f0f0f0;">'
-					+ thumb
-					+ '<label style="display:block;font-weight:600;margin-bottom:4px;">' + label + '</label>'
-					+ '<input type="text" class="widefat sba-alt-input" data-index="' + n + '"' + xrefAttr + ' placeholder="Popíšte obrázok…" value="' + $('<div>').text(suggested).html() + '" style="width:100%;">'
-					+ '</div>';
+				var input = $('<input type="text" class="widefat sba-alt-input" placeholder="Popíšte obrázok…" style="width:100%;">')
+					.attr('data-index', n).val(suggested);
+				if (img.struct_fig_xref) { input.attr('data-struct-xref', parseInt(img.struct_fig_xref, 10)); }
+				fields.append(field.append(thumb, label, input));
 			});
-			$('#sba-alt-fields').html(fields);
 		}
 
 		function renderAltFieldsFallback(imageCount) {
@@ -166,16 +175,26 @@
 
 		$(document).on('click', '.sba-alts-btn', function () {
 			altCurrentId = $(this).data('id');
+			var id = altCurrentId;
+			var generation = ++altGeneration;
+			altLoading = true;
+			altSaving = false;
+			altSuggesting = false;
+			$('#sba-alt-suggest').text('🤖 Navrhnúť AI alt texty');
+			$('#sba-alt-suggest-status').text('');
+			$('#sba-alt-save, #sba-alt-suggest').prop('disabled', true);
 			var imageCount = parseInt($(this).data('images'), 10) || 1;
 			$('#sba-alt-fields').html('<p style="color:#666;font-size:13px;">Načítavam náhľady…</p>');
 			$('#sba-alt-modal').addClass('open');
-			$.post(ajaxUrl, { action: 'sba_pdf_images', nonce: nonce, id: altCurrentId })
+			$.post(ajaxUrl, { action: 'sba_pdf_images', nonce: nonce, id: id })
 				.done(function (r) {
+					if (!isCurrentAlt(id, generation)) return;
 					var imgs = r.success && r.data && Array.isArray(r.data.images) ? r.data.images : null;
 					var altTaggedPdf = !!(r.success && r.data && r.data.tagged_pdf);
-					var tagNotice = altTaggedPdf
-						? '<p style="font-size:12px;color:#0a3622;background:#d1e7dd;padding:8px 12px;border-radius:4px;margin:0 0 12px;">Alt texty sa zapíšu priamo do PDF (dokument má tagovanú štruktúru).</p>'
-						: '<p style="font-size:12px;color:#664d03;background:#fff3cd;padding:8px 12px;border-radius:4px;margin:0 0 12px;">Alt texty sa uložia do databázy (dokument nie je tagovaný).</p>';
+					var hasAmbiguousMapping = imgs && imgs.some(function (img) { return !img.struct_fig_xref; });
+					var tagNotice = altTaggedPdf && !hasAmbiguousMapping
+						? '<p style="font-size:12px;color:#0a3622;background:#d1e7dd;padding:8px 12px;border-radius:4px;margin:0 0 12px;">Pri ukladaní sa overí bezpečný zápis alt textov do PDF.</p>'
+						: '<p style="font-size:12px;color:#664d03;background:#fff3cd;padding:8px 12px;border-radius:4px;margin:0 0 12px;">Niektoré obrázky nemožno bezpečne spojiť so štruktúrou PDF. Ich popisy zostanú iba vo WordPresse; dokument vyžaduje ďalšiu kontrolu.</p>';
 					if (imgs && imgs.length) {
 						renderAltFields(imgs, r.data.suggested_alts || {});
 					} else {
@@ -183,10 +202,19 @@
 					}
 					$('#sba-alt-fields').prepend(tagNotice);
 				})
-				.fail(function () { renderAltFieldsFallback(imageCount); });
+				.fail(function () {
+					if (isCurrentAlt(id, generation)) renderAltFieldsFallback(imageCount);
+				})
+				.always(function () {
+					if (!isCurrentAlt(id, generation)) return;
+					altLoading = false;
+					$('#sba-alt-save, #sba-alt-suggest').prop('disabled', false);
+				});
 		});
 
 		$(document).on('click', '#sba-alt-cancel', function () {
+			altCurrentId = null;
+			altGeneration++;
 			$('#sba-alt-modal').removeClass('open');
 		});
 
@@ -194,11 +222,14 @@
 			var wrap = input.closest('div');
 			wrap.find('.sba-alt-note').remove();
 			if (text) {
-				input.after('<div class="sba-alt-note" style="font-size:11px;margin-top:3px;color:' + (isError ? '#d63638' : '#646970') + ';">' + text + '</div>');
+				input.after($('<div>', { class: 'sba-alt-note' }).css({ fontSize: '11px', marginTop: '3px', color: isError ? '#d63638' : '#646970' }).text(text));
 			}
 		}
 
 		$(document).on('click', '#sba-alt-suggest', function () {
+			if (altCurrentId === null || altLoading || altSaving || altSuggesting) return;
+			var id = altCurrentId;
+			var generation = altGeneration;
 			var btn = $(this);
 			var status = $('#sba-alt-suggest-status');
 			var emptyInputs = $('.sba-alt-input').filter(function () { return $(this).val().trim() === ''; });
@@ -210,10 +241,13 @@
 			}
 
 			btn.prop('disabled', true).text('Generujem návrhy…');
+			altSuggesting = true;
+			$('#sba-alt-save').prop('disabled', true);
 			status.css('color', '#646970').text('');
 
-			$.post(ajaxUrl, { action: 'sba_pdf_suggest_alts', nonce: nonce, id: altCurrentId, indices: indices })
+			$.post(ajaxUrl, { action: 'sba_pdf_suggest_alts', nonce: nonce, id: id, indices: indices })
 				.done(function (r) {
+					if (!isCurrentAlt(id, generation)) return;
 					if (!r.success) {
 						status.css('color', '#d63638').text(r.data || 'Návrh sa nepodaril.');
 						return;
@@ -243,9 +277,13 @@
 					status.css('color', failed && !filled ? '#d63638' : '#0a3622').text(msg);
 				})
 				.fail(function () {
+					if (!isCurrentAlt(id, generation)) return;
 					status.css('color', '#d63638').text('Požiadavka na AI návrh zlyhala.');
 				})
 				.always(function () {
+					if (!isCurrentAlt(id, generation)) return;
+					altSuggesting = false;
+					$('#sba-alt-save').prop('disabled', false);
 					btn.prop('disabled', false).text('🤖 Navrhnúť AI alt texty');
 				});
 		});
@@ -264,6 +302,11 @@
 		}
 
 		$(document).on('click', '#sba-alt-save', function () {
+			if (altCurrentId === null || altLoading || altSaving || altSuggesting) return;
+			var id = altCurrentId;
+			var generation = altGeneration;
+			altSaving = true;
+			$('#sba-alt-save, #sba-alt-suggest').prop('disabled', true);
 			var alts = {};
 			var structXrefs = {};
 			$('.sba-alt-input').each(function () {
@@ -275,10 +318,11 @@
 			$.post(ajaxUrl, {
 				action: 'sba_pdf_save_alts',
 				nonce: nonce,
-				id: altCurrentId,
+				id: id,
 				alts: alts,
 				struct_xrefs: structXrefs,
 			}).done(function (r) {
+				if (!isCurrentAlt(id, generation)) return;
 				if (r.success) {
 					$('#sba-alt-modal').removeClass('open');
 					var es = (r.data && r.data.embed_status) || 'wp_only';
@@ -288,17 +332,25 @@
 					showNotice(msg, es === 'embedded' ? 'success' : 'warning');
 					// Never mark the card green optimistically. Re-check the PDF so the
 					// UI reflects what was actually written into its structure tree.
-					$.post(ajaxUrl, { action: 'sba_pdf_check', nonce: nonce, id: altCurrentId })
+					$.post(ajaxUrl, { action: 'sba_pdf_check', nonce: nonce, id: id })
 						.done(function (check) {
+							if (!isCurrentAlt(id, generation)) return;
 							if (check.success) {
-								refreshCard(altCurrentId, check.data);
-								refreshAttachmentPanel(altCurrentId, check.data);
+								refreshCard(id, check.data);
+								refreshAttachmentPanel(id, check.data);
 							}
 						});
 				} else {
 					showNotice('Alt texty sa nepodarilo uložiť.', 'error');
 				}
-			}).fail(function () { showNotice('Požiadavka zlyhala.', 'error'); });
+			}).fail(function () {
+				if (isCurrentAlt(id, generation)) showNotice('Požiadavka zlyhala.', 'error');
+			})
+				.always(function () {
+					if (!isCurrentAlt(id, generation)) return;
+					altSaving = false;
+					$('#sba-alt-save, #sba-alt-suggest').prop('disabled', false);
+				});
 		});
 
 		// ─── Meta title modal ─────────────────────────────────────────────

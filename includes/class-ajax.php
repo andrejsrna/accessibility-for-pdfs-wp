@@ -44,12 +44,15 @@ function sba_pdf_ajax_queue_single(): void {
  * backlog, not just brand-new uploads. */
 function sba_pdf_ajax_queue_all(): void {
 	check_ajax_referer( 'sba_pdf_a11y', 'nonce' );
-	if ( ! current_user_can( 'upload_files' ) ) {
+	if ( ! current_user_can( 'manage_options' ) ) {
 		wp_die( '', 403 );
 	}
 
 	$queued = 0;
 	foreach ( sba_pdf_get_all( 1, 9999 ) as $attachment ) {
+		if ( ! current_user_can( 'edit_post', $attachment->ID ) || get_post_mime_type( $attachment->ID ) !== 'application/pdf' ) {
+			continue;
+		}
 		$meta   = sba_pdf_get_meta( $attachment->ID );
 		$status = sba_pdf_compute_status( $meta );
 
@@ -267,16 +270,31 @@ function sba_pdf_ajax_save_alts(): void {
 
 	// Persist embed status in PDF a11y meta
 	$meta                    = sba_pdf_get_meta( $id );
+	// Refresh checker facts after changing the bytes. Never retain a stale
+	// missing-Alt count or infer complete coverage from an embedding count.
+	if ( $path && file_exists( $path ) ) {
+		$checked = sba_pdf_run( 'check', $path );
+		if ( is_array( $checked ) && ! isset( $checked['error'] ) && ! isset( $checked['raw'] ) && isset( $checked['has_text'], $checked['tagged_pdf'], $checked['images_without_alt'] ) ) {
+			$checked['checked_at'] = current_time( 'mysql' );
+			$meta = sba_pdf_save_status_meta( $id, $checked );
+		} else {
+			$meta['images_without_alt'] = null;
+		}
+	}
 	$meta['alt_embed_status'] = $embed_status;
 	$meta['alt_embed_count']  = $embed_count;
 	$meta['review_required']  = false;
 	$meta['alts_confirmed_at'] = current_time( 'mysql' );
+	$meta['ai_alt_status'] = 'reviewed';
+	unset( $meta['ai_alt_error'] );
 	sba_pdf_save_meta( $id, $meta );
 
 	wp_send_json_success( [
 		'saved'        => count( $sanitized ),
 		'embed_status' => $embed_status,
 		'embed_count'  => $embed_count,
+		'status'       => $meta,
+		'computed_status' => sba_pdf_compute_status( $meta ),
 	] );
 }
 
@@ -448,8 +466,8 @@ function sba_pdf_ajax_suggest_alts(): void {
 	if ( ! $path || ! file_exists( $path ) ) {
 		wp_send_json_error( 'Súbor nenájdený.' );
 	}
-	if ( ! sba_pdf_openai_api_key() ) {
-		wp_send_json_error( 'AI návrhy nie sú nastavené (chýba OPENAI_API_KEY).' );
+	if ( sba_pdf_ai_provider( $id ) === 'none' ) {
+		wp_send_json_error( 'AI návrhy sú pre tento dokument vypnuté.' );
 	}
 
 	// The client tells us which rows are still empty in its modal — this is
@@ -483,7 +501,7 @@ function sba_pdf_ajax_suggest_alts(): void {
 			continue;
 		}
 		$img        = $images[ $idx ];
-		$suggestion = sba_pdf_suggest_alt_text( (string) ( $img['thumb'] ?? '' ), $doc_title, (int) ( $img['page'] ?? 0 ) );
+		$suggestion = sba_pdf_suggest_alt_text( (string) ( $img['thumb'] ?? '' ), $doc_title, (int) ( $img['page'] ?? 0 ), $id );
 		$suggestions[ $idx ] = isset( $suggestion['alt'] )
 			? [ 'alt' => $suggestion['alt'], 'decorative' => ! empty( $suggestion['decorative'] ) ]
 			: [ 'error' => $suggestion['error'] ?? 'Neznáma chyba.' ];

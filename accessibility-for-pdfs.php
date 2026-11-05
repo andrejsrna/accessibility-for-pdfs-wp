@@ -2,29 +2,29 @@
 /**
  * Plugin Name: SBA PDF Accessibility
  * Description: Kontrola a oprava prístupnosti PDF súborov (OCR, záložky, metadata, fonty, jazyk, alt texty).
- * Version: 1.0.0
+ * Version: 1.4.0
  * Author: SBA Agency
  */
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'SBA_PDF_A11Y_VERSION', '1.3.0' );
+define( 'SBA_PDF_A11Y_VERSION', '1.4.0' );
 define( 'SBA_PDF_A11Y_DIR', plugin_dir_path( __FILE__ ) );
 define( 'SBA_PDF_A11Y_URL', plugin_dir_url( __FILE__ ) );
 define( 'SBA_PDF_A11Y_PYTHON_SCRIPT', SBA_PDF_A11Y_DIR . 'bin/process_pdf.py' );
 define( 'SBA_PDF_A11Y_META_KEY', '_sba_pdf_a11y' );
 define( 'SBA_PDF_A11Y_ALT_META_KEY', '_sba_pdf_image_alts' );
 
-// Auto-confirm AI alt-text suggestions so a freshly uploaded PDF flows all
-// the way to "Pripravené" without an editor clicking "Potvrdiť". Set to
-// false to restore the manual review step. Alt texts stay in WP postmeta;
-// embedding them into the PDF structure still happens only on a manual save.
-define( 'SBA_PDF_A11Y_AUTO_CONFIRM_ALTS', true );
-
-// Route AI alt-text suggestions through the host Codex bridge (ChatGPT
-// subscription, no per-token API cost) instead of the direct OpenAI Vision
-// API. Falls back to the API automatically if the bridge is unavailable.
-define( 'SBA_PDF_A11Y_USE_CODEX', true );
+// Accept completed AI suggestions automatically, without claiming PDF compliance.
+if ( ! defined( 'SBA_PDF_A11Y_AUTO_CONFIRM_ALTS' ) ) {
+	define( 'SBA_PDF_A11Y_AUTO_CONFIRM_ALTS', true );
+}
+// Preserve this deployment's intentional Codex bridge workflow. wp-config may
+// override this legacy switch or set AI_PROVIDER to none/codex/openai. No
+// direct external API fallback is allowed unless separately opted in.
+if ( ! defined( 'SBA_PDF_A11Y_USE_CODEX' ) ) {
+	define( 'SBA_PDF_A11Y_USE_CODEX', true );
+}
 
 // Core includes. Keep helpers first: other modules depend on them.
 require_once SBA_PDF_A11Y_DIR . 'includes/class-helpers.php';

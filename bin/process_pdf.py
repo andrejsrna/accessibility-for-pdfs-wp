@@ -13,7 +13,10 @@ import base64
 import html
 
 try:
-    import fitz  # PyMuPDF
+    try:
+        import pymupdf as fitz
+    except ImportError:
+        import fitz  # Compatibility with older PyMuPDF releases.
 except ImportError:
     print(json.dumps({"error": "PyMuPDF not installed. Run: pip3 install pymupdf"}))
     sys.exit(1)
@@ -81,9 +84,13 @@ def check_pdf(path: str) -> dict:
         if image_total:
             alt_count = 0
             if result["tagged_pdf"]:
-                for figure_xref in _struct_figures_ordered(doc):
-                    _kind, alt = doc.xref_get_key(figure_xref, "Alt")
-                    if alt and alt.strip("()"):
+                mapping = _proven_image_figures(path, doc)
+                for image_xref in seen_xrefs:
+                    figure_xref = mapping.get(image_xref)
+                    if figure_xref is None:
+                        continue
+                    kind, alt = doc.xref_get_key(figure_xref, "Alt")
+                    if kind == "string" and alt.strip():
                         alt_count += 1
             result["images_with_alt"] = min(image_total, alt_count)
             result["images_without_alt"] = max(0, image_total - alt_count)
@@ -93,8 +100,11 @@ def check_pdf(path: str) -> dict:
             for font in page.get_fonts():
                 # font tuple: (xref, ext, type, basefont, name, encoding, referencer)
                 font_type = font[2]
-                # Type3 and unembedded fonts are a concern
-                if font_type in ("Type1", "TrueType", "Type0") and not font[1]:
+                # PyMuPDF reports missing font programs as "n/a", not "".
+                # Type3 fonts contain glyph streams rather than a font file.
+                if font_type != "Type3" and (
+                    not font[1] or str(font[1]).lower() in ("n/a", "none", "null")
+                ):
                     result["fonts_embedded"] = False
                     break
 
@@ -357,6 +367,7 @@ def localtag_pdf(path: str, lang: str = "sk", title: str = "") -> dict:
     dest_tmp = path + ".localtag.tmp"
     tmpdir = tempfile.mkdtemp(prefix="sba_odl_")
     output = os.path.join(tmpdir, os.path.splitext(os.path.basename(path))[0] + "_tagged.pdf")
+    backup_kept = False
 
     try:
         proc = subprocess.run(
@@ -393,11 +404,10 @@ def localtag_pdf(path: str, lang: str = "sk", title: str = "") -> dict:
         # atomically replace the original file within the same filesystem.
         shutil.copy2(output, dest_tmp)
         os.replace(dest_tmp, path)
-        try:
-            os.unlink(backup)
-        except Exception:
-            pass
+        # Keep the recovery copy until all post-replacement checks complete.
         final = check_pdf(path)
+        if final.get("error"):
+            raise RuntimeError(final["error"])
         final.update({
             "localtagged": True,
             "tagged_pdf": True,
@@ -405,10 +415,11 @@ def localtag_pdf(path: str, lang: str = "sk", title: str = "") -> dict:
             "message": "PDF lokálne tagované cez OpenDataLoader; vyžaduje kontrolu/validáciu.",
         })
         return final
-    except subprocess.TimeoutExpired:
-        shutil.copy2(backup, path)
-        return {"localtagged": False, "tagged_pdf": False, "reason": "timeout", "error": "OpenDataLoader timed out"}
     except Exception as exc:
+        timeout = isinstance(exc, subprocess.TimeoutExpired)
+        failure = {"localtagged": False, "tagged_pdf": False,
+                   "reason": "timeout" if timeout else "localtag_error",
+                   "error": "OpenDataLoader timed out" if timeout else str(exc)[:500]}
         if os.path.exists(dest_tmp):
             try:
                 os.unlink(dest_tmp)
@@ -417,12 +428,13 @@ def localtag_pdf(path: str, lang: str = "sk", title: str = "") -> dict:
         if os.path.exists(backup):
             try:
                 shutil.copy2(backup, path)
-            except Exception:
-                pass
-        return {"localtagged": False, "tagged_pdf": False, "reason": "localtag_error", "error": str(exc)[:500]}
+            except Exception as restore_exc:
+                backup_kept = True
+                failure.update({"backup": backup, "restore_error": str(restore_exc)[:500]})
+        return failure
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
-        if os.path.exists(backup):
+        if not backup_kept and os.path.exists(backup):
             try:
                 os.unlink(backup)
             except Exception:
@@ -479,6 +491,122 @@ def _struct_figures_ordered(doc: fitz.Document) -> list:
     return figures
 
 
+def _proven_image_figures(path: str, doc: fitz.Document) -> dict:
+    """Map image xrefs only when one page MCID proves a unique occurrence.
+
+    Resource order and structure order are unrelated. Parse content operators,
+    not stream text, and require a single image Do inside the Figure's MCID.
+    Forms, inline images, complex Figure children, reused images, and malformed
+    content deliberately fail closed. pikepdf is optional: previews still work
+    without it, but no image-to-Figure correspondence is then asserted.
+    """
+    try:
+        import pikepdf
+        from collections import Counter, defaultdict
+
+        with pikepdf.open(path) as pdf:
+            root = pdf.Root.get("/StructTreeRoot")
+            if root is None or root.get("/RoleMap"):
+                return {}  # Custom role resolution is outside this safe subset.
+            figures = []
+            visited = set()
+
+            def visit(node, depth=0):
+                # Unlike best-effort tree display, a truncated discovery cannot
+                # prove ownership. Reject cycles, deep trees and inline nodes.
+                if (depth > 100 or not isinstance(node, pikepdf.Dictionary)
+                        or not node.objgen[0] or node.objgen in visited):
+                    raise ValueError("Unsupported or incomplete structure tree")
+                visited.add(node.objgen)
+                if str(node.get("/S")) == "/Figure":
+                    figures.append(node)
+                    return
+                kids = node.get("/K")
+                if kids is None:
+                    return
+                for kid in kids if isinstance(kids, pikepdf.Array) else [kids]:
+                    if isinstance(kid, int):
+                        continue  # Non-Figure marked text content.
+                    if isinstance(kid, pikepdf.Dictionary) and str(kid.get("/Type")) in ("/MCR", "/OBJR"):
+                        continue
+                    visit(kid, depth + 1)
+
+            visit(root)
+            occurrences = Counter()
+            mcid_uses = Counter()
+            draws = defaultdict(list)
+            for page in pdf.pages:
+                page_id = page.obj.objgen[0]
+                resources = page.obj.get("/Resources", {})
+                xobjects = resources.get("/XObject", {})
+                stack = []
+                for instruction in pikepdf.parse_content_stream(page):
+                    operands, operator = instruction.operands, str(instruction.operator)
+                    if operator in ("BDC", "BMC"):
+                        mcid = None
+                        if operator == "BDC" and len(operands) == 2:
+                            props = operands[1]
+                            if isinstance(props, pikepdf.Name):
+                                props = resources.get("/Properties", {}).get(props, {})
+                            if isinstance(props, pikepdf.Dictionary):
+                                value = props.get("/MCID")
+                                if isinstance(value, int) and value >= 0:
+                                    mcid = value
+                                    mcid_uses[(page_id, mcid)] += 1
+                        stack.append(mcid)
+                    elif operator == "EMC":
+                        if not stack:
+                            return {}
+                        stack.pop()
+                    elif operator == "Do":
+                        obj = xobjects.get(operands[0])
+                        if obj is None or str(obj.get("/Subtype")) != "/Image":
+                            return {}  # Form XObjects need their own stream/MCID scope.
+                        image_xref = obj.objgen[0]
+                        if not image_xref:
+                            return {}
+                        occurrences[image_xref] += 1
+                        for mcid in stack:
+                            if mcid is not None:
+                                draws[(page_id, mcid)].append(image_xref)
+                    elif operator == "INLINE IMAGE":
+                        return {}
+                if stack:
+                    return {}
+
+            candidates = defaultdict(list)
+            for obj in figures:
+                figure = obj.objgen[0]
+                # PyMuPDF must address the same original indirect object.
+                if doc.xref_get_key(figure, "S") != ("name", "/Figure"):
+                    return {}
+                page_ref = obj.get("/Pg")
+                kid = obj.get("/K")
+                if isinstance(kid, pikepdf.Dictionary):
+                    if str(kid.get("/Type")) != "/MCR" or kid.get("/Stm") is not None:
+                        return {}
+                    page_ref = kid.get("/Pg", page_ref)
+                    kid = kid.get("/MCID")
+                if page_ref is None or not isinstance(kid, int) or kid < 0:
+                    # An unsupported Figure could own the same content; do not
+                    # ignore it and thereby manufacture a unique owner.
+                    return {}
+                key = (page_ref.objgen[0], kid)
+                candidates[key].append(figure)
+
+            mapping = {}
+            for key, figures in candidates.items():
+                images = draws.get(key, [])
+                if len(figures) == len(images) == mcid_uses[key] == 1:
+                    image = images[0]
+                    if occurrences[image] == 1:
+                        mapping.setdefault(image, []).append(figures[0])
+            # Nested Figure MCIDs must not produce two possible owners.
+            return {image: owners[0] for image, owners in mapping.items() if len(owners) == 1}
+    except Exception:
+        return {}
+
+
 def write_alts(path: str, alts_data: list) -> dict:
     """Write /Alt into PDF Structure Tree Figure elements.
 
@@ -488,20 +616,26 @@ def write_alts(path: str, alts_data: list) -> dict:
     {"embedded": false, "reason": "untagged"} and leaves the file untouched.
     Creates a .altbak backup before any modification; backup is deleted on success.
     """
-    probe = fitz.open(path)
-    tagged = _has_struct_tree(probe)
-    probe.close()
+    with fitz.open(path) as probe:
+        tagged = _has_struct_tree(probe)
+        mapping = _proven_image_figures(path, probe) if tagged else {}
 
     if not tagged:
         return {"embedded": False, "reason": "untagged"}
 
-    entries = [
-        e for e in alts_data
-        if isinstance(e.get("struct_xref"), int) and e["struct_xref"] > 0
-        and str(e.get("alt", "")).strip()
-    ]
+    if not isinstance(alts_data, list) or any(not isinstance(e, dict) for e in alts_data):
+        return {"embedded": False, "reason": "invalid_alt_data"}
+    entries = [e for e in alts_data if str(e.get("alt", "")).strip()]
     if not entries:
         return {"embedded": False, "reason": "no_tagged_images"}
+    proven_figures = set(mapping.values())
+    if any(type(e.get("struct_xref")) is not int or e["struct_xref"] not in proven_figures
+           for e in entries):
+        return {"embedded": False, "reason": "ambiguous_image_mapping",
+                "error": "Cannot prove a unique page MCID/image occurrence for every requested Figure; PDF unchanged."}
+    if len({e["struct_xref"] for e in entries}) != len(entries):
+        return {"embedded": False, "reason": "ambiguous_image_mapping",
+                "error": "Duplicate Figure targets; PDF unchanged."}
 
     backup = path + ".altbak"
     shutil.copy2(path, backup)
@@ -516,20 +650,20 @@ def write_alts(path: str, alts_data: list) -> dict:
             doc.xref_set_key(xref, "Alt", _pdf_str(alt))
             count += 1
 
-        doc.save(tmp, garbage=4, deflate=True)
+        # Keep editor-issued Figure IDs stable. garbage >= 2 renumbers xrefs.
+        doc.save(tmp, garbage=0, deflate=True)
         doc.close()
 
-        # Verify: re-open and confirm /Alt is readable on at least one element
-        vdoc = fitz.open(tmp)
-        verified = 0
-        for entry in entries:
-            xref = int(entry["struct_xref"])
-            _typ, val = vdoc.xref_get_key(xref, "Alt")
-            if val:
-                verified += 1
-        vdoc.close()
+        # All requested values must round-trip exactly, not merely be truthy
+        # (the missing-key value is the truthy string "null").
+        with fitz.open(tmp) as vdoc:
+            verified = sum(
+                vdoc.xref_get_key(entry["struct_xref"], "Alt")
+                == ("string", str(entry["alt"]).strip())
+                for entry in entries
+            )
 
-        if verified == 0:
+        if verified != len(entries):
             os.unlink(tmp)
             return {"embedded": False, "reason": "verify_failed", "backup": backup}
 
@@ -641,18 +775,17 @@ def extract_image_previews(path: str, max_images: int = 30) -> dict:
             })
             count += 1
 
-    # Match images to struct Figure elements by sequential order (heuristic).
-    # Works reliably for well-structured tagged PDFs where Figure count == image count.
-    if tagged:
-        figs = _struct_figures_ordered(doc)
-        for i, img in enumerate(images):
-            img['struct_fig_xref'] = figs[i] if i < len(figs) else None
-            if img['struct_fig_xref']:
-                _kind, alt = doc.xref_get_key(img['struct_fig_xref'], "Alt")
-                img['has_alt'] = bool(alt and alt.strip("()"))
-    else:
-        for img in images:
-            img['struct_fig_xref'] = None
+    # Never infer correspondence from resource order or Figure tree order.
+    mapping = _proven_image_figures(path, doc) if tagged else {}
+    for img in images:
+        figure = mapping.get(img["xref"])
+        img["struct_fig_xref"] = figure
+        img["has_alt"] = False
+        if figure:
+            kind, alt = doc.xref_get_key(figure, "Alt")
+            img["has_alt"] = kind == "string" and bool(alt.strip())
+        elif tagged:
+            img["mapping_reason"] = "ambiguous_image_mapping"
 
     doc.close()
     return {"images": images, "tagged_pdf": tagged}
